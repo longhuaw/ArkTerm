@@ -6,6 +6,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
+const { diffLines } = require('diff');
 const { isSafeCommand } = require('./security');
 
 const WORKSPACE = process.cwd();
@@ -91,12 +92,20 @@ function readFile(filePath) {
 function writeFile(filePath, content) {
   const abs = path.resolve(WORKSPACE, filePath);
   const dir = path.dirname(abs);
+  const oldContent = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : '';
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
   fs.writeFileSync(abs, content, 'utf-8');
   const stat = fs.statSync(abs);
-  return `✅ ${filePath} written (${stat.size} bytes).`;
+  let diffOut = '';
+  if (oldContent) {
+    const changes = diffLines(oldContent, content);
+    const added = changes.filter((c) => c.added).reduce((s, c) => s + c.value.split('\n').filter(Boolean).length, 0);
+    const removed = changes.filter((c) => c.removed).reduce((s, c) => s + c.value.split('\n').filter(Boolean).length, 0);
+    diffOut = `\n  ${chalk.green('+' + added)} ${chalk.red('-' + removed)} lines changed`;
+  }
+  return `✅ ${filePath} written (${stat.size} bytes).${diffOut}`;
 }
 
 /**
@@ -109,22 +118,26 @@ function patchFile(filePath, search, replace) {
     return `[Error] 文件不存在: ${filePath}`;
   }
   const original = fs.readFileSync(abs, 'utf-8');
-  if (!original.includes(search)) {
-    // try fuzzy: strip leading whitespace tolerance
-    const normalized = original
-      .split('\n')
-      .map((l) => l.trimEnd())
-      .join('\n');
-    const searchNorm = search
-      .split('\n')
-      .map((l) => l.trimEnd())
-      .join('\n');
-    if (normalized.includes(searchNorm)) {
-      // Reconstruct with original whitespace — just do direct replacement
-      return `[Error] 精确匹配失败，存在空白符差异。请提供精确的原文片段。`;
+  let matchIndex = original.indexOf(search);
+
+  if (matchIndex === -1) {
+    // Try trimming trailing whitespace per line
+    const normalized = original.split('\n').map((l) => l.trimEnd()).join('\n');
+    const searchNorm = search.split('\n').map((l) => l.trimEnd()).join('\n');
+    matchIndex = normalized.indexOf(searchNorm);
+
+    if (matchIndex !== -1) {
+      // Map match position back to original — replace using normalized then
+      const updated = normalized.replace(searchNorm, replace);
+      const changes = diffLines(original, updated);
+      const added = changes.filter((c) => c.added).reduce((s, c) => s + c.value.split('\n').filter(Boolean).length, 0);
+      const removed = changes.filter((c) => c.removed).reduce((s, c) => s + c.value.split('\n').filter(Boolean).length, 0);
+      fs.writeFileSync(abs, updated, 'utf-8');
+      const stat = fs.statSync(abs);
+      return `✅ ${filePath} patched (${stat.size} bytes, fuzzy whitespace match).\n  ${chalk.green('+' + added)} ${chalk.red('-' + removed)} lines changed`;
     }
 
-    // Try to locate similar lines
+    // Try to locate similar lines for a helpful error
     const searchFirstLine = search.split('\n')[0].trim();
     const lines = original.split('\n');
     const similar = lines
@@ -144,14 +157,20 @@ function patchFile(filePath, search, replace) {
     return `[Error] 未找到匹配内容: "${search.slice(0, 60)}..."`;
   }
 
-  const updated = original.replace(search, replace);
+  const updated = original.slice(0, matchIndex) + replace + original.slice(matchIndex + search.length);
   if (updated === original) {
     return `[Error] 替换后无变化，请检查 search/replace 内容。`;
   }
 
   fs.writeFileSync(abs, updated, 'utf-8');
-  const replacedLen = search.length;
-  return `✅ ${filePath} patched (${replacedLen} chars replaced).`;
+  const stat = fs.statSync(abs);
+
+  // Generate diff summary
+  const changes = diffLines(original, updated);
+  const added = changes.filter((c) => c.added).reduce((s, c) => s + c.value.split('\n').filter(Boolean).length, 0);
+  const removed = changes.filter((c) => c.removed).reduce((s, c) => s + c.value.split('\n').filter(Boolean).length, 0);
+
+  return `✅ ${filePath} patched (${stat.size} bytes).\n  ${chalk.green('+' + added)} ${chalk.red('-' + removed)} lines changed`;
 }
 
 /**

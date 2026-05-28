@@ -2,20 +2,18 @@
 // ArkTerm — Terminal AI Agent Main Loop
 // ---------------------------------------------------------------------------
 let exitConfirmCount = 0;
-const { stripVTControlCharacters } = require('util');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const chalk = require('chalk');
 const boxen = require('boxen');
 const readline = require('readline');
-const http = require('http');
-const https = require('https');
 const { OpenAI } = require('openai');
 const { ChatSession } = require('./session');
 const { TOOL_SCHEMAS, TOOL_DISPATCH } = require('./tools');
 const config = require('./config');
-const { MODEL_REGISTRY, state, switchModel, getCurrentDisplayName } = config;
+const { renderMarkdown, renderDiff, createSpinner } = require('./ui');
+const { MODEL_REGISTRY, state, ALIASES, switchModel, getCurrentDisplayName } = config;
 
 // ── Constants ─────────────────────────────────────────────────────────────
 const AGENT_MAX_TURNS = 10;
@@ -48,19 +46,30 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 
 function createClient() {
   const { apiKey, baseURL } = config.getClientConfig();
+  const configKey = `${apiKey}::${baseURL}`;
+
+  // Return cached client if config hasn't changed
+  if (_cachedClient && _cachedConfigKey === configKey) {
+    return _cachedClient;
+  }
+
   const proxy = process.env.HTTPS_PROXY || process.env.http_proxy;
 
-  // 如果有代理设置，创建一个代理 Agent；否则使用直连
-  const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
+  // Create proxy agent with keepalive enabled
+  const agent = proxy
+    ? new HttpsProxyAgent(proxy, { keepAlive: true })
+    : undefined;
 
-  return new OpenAI({
+  _cachedClient = new OpenAI({
     apiKey,
     baseURL,
-    timeout: 30_000,
-    // 只有存在代理时才配置 agent，否则不配置（由系统决定）
+    timeout: 60_000,
+    maxRetries: 2,
     httpAgent: agent,
     httpsAgent: agent,
   });
+  _cachedConfigKey = configKey;
+  return _cachedClient;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -101,18 +110,6 @@ function visualWidth(str) {
   return w;
 }
 
-function detectIntent(text) {
-  const writingHints = /(?:^|\s)(?:read|write|edit|patch|create|make|run|exec|ls|cd|cat|grep|find|install|build|test|deploy|view|show|list|change|update|delete|remove|add|fix|debug|refactor|rename|move|copy|search|replace|format|compile|start|stop|restart)(?:\s|$)/i;
-  const toolWords = [
-    'file', 'directory', 'folder', 'project', 'code', 'script', 'config',
-    'module', 'package', 'function', 'class', 'import', 'require',
-    'read', 'check', 'see what', 'show me', 'list',
-  ];
-  const hasWriteIntent = writingHints.test(text);
-  const hasToolWords = toolWords.some((w) => text.toLowerCase().includes(w));
-  return hasWriteIntent || hasToolWords;
-}
-
 // ── Stream & Live Display (boxen‑based real‑time panel) ───────────────────
 
 async function streamWithPanel(client, messages, withTools) {
@@ -128,6 +125,7 @@ async function streamWithPanel(client, messages, withTools) {
     model: state.modelId,
     messages,
     stream: true,
+    max_tokens: 8192,
     stream_options: { include_usage: true },
   };
   if (withTools) body.tools = TOOL_SCHEMAS;
@@ -158,7 +156,6 @@ async function streamWithPanel(client, messages, withTools) {
     const lines = boxStr.split('\n');
     const lineCount = lines.length;
     if (lastBoxLineCount > 0) {
-      // Keep the top border line fixed; redraw from line 2 onward
       process.stdout.write(`\x1b[${lastBoxLineCount - 1}A\x1b[J`);
       process.stdout.write(lines.slice(1).join('\n') + '\n');
     } else {
@@ -170,6 +167,8 @@ async function streamWithPanel(client, messages, withTools) {
   // Seed placeholder
   renderBox('', 0, 0, 0, 0);
   let lastRender = 0;
+  let lastContent = '';
+  const RENDER_INTERVAL = 80; // ms between renders
 
   const updateFn = (now) => {
     const elapsed = (now - startTime) / 1000;
@@ -180,10 +179,18 @@ async function streamWithPanel(client, messages, withTools) {
     const displayText = fullText
       ? (totalChars > 200 ? '…' + fullText.slice(-200) : fullText)
       : '';
+
+    // Only render when content changes
+    if (displayText === lastContent && lastBoxLineCount > 0) {
+      return;
+    }
+    lastContent = displayText;
     renderBox(displayText, genS, ttft, avgS, totalChars);
   };
+  let spinner = null;
   try {
     const stream = await client.chat.completions.create(body);
+    // Show spinner only while waiting for first actual data chunk
     for await (const chunk of stream) {
       const delta = chunk.choices?.[0]?.delta;
       if (delta?.content) {
@@ -203,26 +210,28 @@ async function streamWithPanel(client, messages, withTools) {
           if (tc.function?.arguments) toolCallsAcc[idx].function.arguments += tc.function.arguments;
         }
       }
+
+      // Check for truncation
+      const reason = chunk.choices?.[0]?.finish_reason;
+      if (reason === 'length') {
+        fullText += '\n\n[⚠ Response truncated — consider reducing context or increasing max_tokens]';
+      }
+
       const now = Date.now();
-      if (now - lastRender > 50) {
+      if (now - lastRender > RENDER_INTERVAL) {
         lastRender = now;
         updateFn(now);
       }
     }
 
     // Final render
-    const now = Date.now();
-    updateFn(now);
+    updateFn(Date.now());
 
     // Enforce final line-feed
     process.stdout.write('\n');
 
-    // Build tool calls list
+    // Build tool calls list (preserve insertion order from object)
     const toolCalls = Object.values(toolCallsAcc)
-      .sort((a, b) => {
-        // index-based sort is inherent from Object.values insertion order
-        return 0;
-      })
       .map((tc) => ({
         id: tc.id,
         type: tc.type || 'function',
@@ -477,7 +486,10 @@ async function processAssistantResponse(client, session) {
     session.appendMessage(assistantMsg);
 
     if (effectiveToolCalls.length === 0) {
-      // Pure text response — done
+      // Pure text response — render markdown and finish
+      if (displayText) {
+        console.log(renderMarkdown(displayText));
+      }
       return;
     }
 
@@ -506,7 +518,7 @@ async function processAssistantResponse(client, session) {
       }
 
       // Clamp result length
-      const maxResultLen = 2000;
+      const maxResultLen = 8000;
       if (result.length > maxResultLen) {
         result = result.slice(0, maxResultLen) + `\n… (truncated, ${result.length} chars total)`;
       }
@@ -575,23 +587,21 @@ async function main() {
     let userInput = await readLine(promptStr);
 
     if (userInput === '__TAB__') {
-      // Cycle to next model
+      // Cycle to next available model
       const keys = Object.keys(MODEL_REGISTRY);
       const curIdx = keys.indexOf(currentModelKey);
-      const nextKey = keys[(curIdx + 1) % keys.length];
-      const display = switchModel(nextKey);
-      if (display) {
-        console.log(chalk.green(`  Switched to ${display}`));
-      } else {
-        const fallbackKeys = Object.keys(ALIASES).filter(
-          (k) => k !== currentModelKey && k !== 'doubao' && k !== 'deepseek' && k !== 'claude'
-        );
-        // Try next alias
-        const altKey = keys[(curIdx + 1) % keys.length];
-        const altDisplay = switchModel(altKey);
-        if (altDisplay) {
-          console.log(chalk.green(`  Switched to ${altDisplay}`));
+      let switched = false;
+      for (let i = 1; i <= keys.length; i++) {
+        const nextKey = keys[(curIdx + i) % keys.length];
+        const display = switchModel(nextKey);
+        if (display) {
+          console.log(chalk.green(`  Switched to ${display}`));
+          switched = true;
+          break;
         }
+      }
+      if (!switched) {
+        console.log(chalk.yellow('  No other model configured.'));
       }
       continue;
     }
@@ -620,6 +630,7 @@ async function main() {
       }
 
       if (cmd === 'help' || cmd === 'h') {
+        const modelList = config.listAvailableModels();
         console.log(`
 ${chalk.bold('Commands')}
   ${chalk.cyan('/model [name]')}   Switch model (doubao/db, deepseek/ds, claude/cl)
@@ -628,6 +639,9 @@ ${chalk.bold('Commands')}
   ${chalk.cyan('/help')}     Show this help
   ${chalk.cyan('/exit')}     Exit ArkTerm
   ${chalk.cyan('Tab')}       Cycle through available models
+
+${chalk.bold('Models')}
+${modelList}
 `);
         continue;
       }
@@ -674,19 +688,8 @@ ${chalk.bold('Commands')}
     // ── Process user message ──
     session.addUserMessage(trimmed);
 
-    // Intent-aware routing
-    const hasToolIntent = detectIntent(trimmed);
-
-    if (hasToolIntent) {
-      // Agent mode: use tools
-      await processAssistantResponse(createClient(), session);
-    } else {
-      // Chat mode: direct streaming (no tools)
-      const client = createClient();
-      const messages = session.getMessages();
-      const { fullText } = await streamWithPanel(client, messages, false);
-      session.addAssistantMessage(fullText);
-    }
+    // Agent mode: always include tools, let the model decide
+    await processAssistantResponse(createClient(), session);
   }
 
   // Restore stdin
