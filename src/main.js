@@ -1,6 +1,8 @@
 // ---------------------------------------------------------------------------
 // ArkTerm — Terminal AI Agent Main Loop
 // ---------------------------------------------------------------------------
+let exitConfirmCount = 0;
+const { stripVTControlCharacters } = require('util');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -202,8 +204,11 @@ async function readLine(promptStr) {
       const left = promptStr + buf.slice(0, pos);
       const right = buf.slice(pos);
       const cursorChar = right.length > 0 ? right[0] : ' ';
+      
       stdout.write('\r' + left + chalk.inverse(cursorChar) + right.slice(1) + '\x1b[K');
-      stdout.write(`\r\x1b[${promptStr.length + pos}C`);
+      
+      const visiblePromptLen = stripVTControlCharacters(promptStr).length;
+      stdout.write(`\r\x1b[${visiblePromptLen + pos}C`);
     }
 
     display();
@@ -275,11 +280,18 @@ async function readLine(promptStr) {
 
         case 'c':
           if (key.ctrl) {
-            stdin.removeListener('keypress', onKeypress);
-            cleanup();
-            stdout.write('\n');
-            resolve(null);
-            return;
+            if (exitConfirmCount === 0) {
+              exitConfirmCount = 1;
+              stdout.write(chalk.yellow('\n ⚠ 再按一次 Ctrl+C 即可退出 ArkTerm.'));
+              setTimeout(() => { exitConfirmCount = 0; }, 5000);
+              return;
+            } else {
+              stdin.removeListener('keypress', onKeypress);
+              cleanup();
+              stdout.write('\n');
+              resolve(null);
+              process.exit(0);
+            }
           }
           break;
 
