@@ -4,7 +4,7 @@
   "description": "🚀 Multi-Model Terminal AI Agent — Doubao · DeepSeek · Claude",
   "main": "src/main.js",
   "bin": {
-    "arkterm": "./bin/index.js"
+    "arkterm": "bin/index.js"
   },
   "scripts": {
     "start": "node bin/index.js",
@@ -40,10 +40,10 @@
   },
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/longhuaw/ArkTerm.git"
   },
   "bugs": {
-    "url": ""
+    "url": "https://github.com/longhuaw/ArkTerm/issues"
   },
-  "homepage": ""
+  "homepage": "https://github.com/longhuaw/ArkTerm#readme"
 }
