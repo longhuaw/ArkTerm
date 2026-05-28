@@ -1,23 +1,49 @@
 {
   "name": "arkterm",
-  "version": "0.4.0",
-  "description": "Next-generation multi-model terminal AI agent dashboard powered by Doubao.",
-  "main": "./bin/index.js",
+  "version": "0.5.0",
+  "description": "🚀 Multi-Model Terminal AI Agent — Doubao · DeepSeek · Claude",
+  "main": "src/main.js",
   "bin": {
     "arkterm": "./bin/index.js"
   },
-  "files": [
-    "bin",
-    "src"
-  ],
+  "scripts": {
+    "start": "node bin/index.js",
+    "test": "node -c src/config.js src/session.js src/security.js src/tools.js src/main.js bin/index.js"
+  },
   "keywords": [
-    "ai",
-    "agent",
-    "terminal",
+    "arkterm",
     "doubao",
     "deepseek",
-    "tui"
+    "claude",
+    "terminal",
+    "ai",
+    "agent",
+    "volcengine"
   ],
-  "author": "Longhua Wang",
-  "license": "MIT"
+  "author": "ArkTerm Contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "dependencies": {
+    "boxen": "^5.1.2",
+    "chalk": "^4.1.2",
+    "dotenv": "^16.4.7",
+    "inquirer": "^8.2.6",
+    "openai": "^4.86.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "bugs": {
+    "url": ""
+  },
+  "homepage": ""
 }
