@@ -19,7 +19,9 @@ const { MODEL_REGISTRY, state, switchModel, getCurrentDisplayName } = config;
 
 // ── Constants ─────────────────────────────────────────────────────────────
 const AGENT_MAX_TURNS = 10;
-const SYSTEM_PROMPT = `You are ArkTerm, an autonomous terminal AI agent. You have access to 5 tools:
+const SYSTEM_PROMPT = `You are ArkTerm, an autonomous terminal AI agent. **You are running on Windows.** Use \`dir\` for listing files and \`type\` for reading files. Do not ask the user for OS information.
+
+You have access to 5 tools:
 
 1. **view_structure** — view the project directory tree (depth ≤ 3)
 2. **read_file** — read a file's content (UTF-8, auto-preview for large files)
@@ -35,9 +37,12 @@ Rules:
 - Each tool call is one unit of work; you have up to 10 turns per request.
 - When the task is complete, explain what was done.
 - For casual questions, just answer directly.
-- **IMPORTANT**: The system is running on **Windows**. Use \`dir\` instead of \`ls\`, \`type\` instead of \`cat\`. Shell commands use Windows conventions (backslash paths, \`&&\` for chaining).`;
+- Shell commands use Windows conventions (backslash paths, \`&&\` for chaining).`;
 
-// ── OpenAI Client Factory (reflects current config state) ─────────────────
+// ── OpenAI Client Factory (cached, reflects current config state) ─────────
+
+let _cachedClient = null;
+let _cachedConfigKey = '';
 
 function createClient() {
   const { apiKey, baseURL } = config.getClientConfig();
@@ -45,12 +50,24 @@ function createClient() {
     console.error(chalk.red('Error: API key or base URL not configured.'));
     process.exit(1);
   }
-  return new OpenAI({
+
+  // Reuse cached client when config hasn't changed — preserves Keep-Alive
+  // connections, reducing TTFT on subsequent requests.
+  const configKey = `${apiKey}::${baseURL}`;
+  if (_cachedClient && _cachedConfigKey === configKey) {
+    return _cachedClient;
+  }
+
+  _cachedClient = new OpenAI({
     apiKey,
     baseURL,
+    timeout: 20_000,       // 20 s total: prevents hanging on proxy/DNS issues
+    maxRetries: 0,         // don't retry first request (saves TTFT; user retries manually)
     httpAgent: new http.Agent({ keepAlive: true }),
     httpsAgent: new https.Agent({ keepAlive: true }),
   });
+  _cachedConfigKey = configKey;
+  return _cachedClient;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

@@ -160,8 +160,18 @@ function patchFile(filePath, search, replace) {
 async function executeCommand(command) {
   // ── Windows command translation ─────────────────────────────────────────
   if (process.platform === 'win32') {
-    command = command.replace(/^ls(\s+.*)?$/i, (_, args) => args ? `dir${args}` : 'dir');
-    command = command.replace(/^cat(\s+.*)$/i, (_, args) => `type${args}`);
+    // ls → dir: strip -flags that don't map to Windows /flags
+    command = command.replace(/^ls(\s+.*)?$/i, (_, trail) => {
+      if (!trail) return 'dir';
+      const cleaned = trail.replace(/(?:^|\s)--?\w+/g, '').replace(/\s+/g, ' ').trim();
+      return cleaned ? `dir ${cleaned}` : 'dir';
+    });
+    // cat → type: same treatment
+    command = command.replace(/^cat(\s+.*)?$/i, (_, trail) => {
+      if (!trail) return 'type';
+      const cleaned = trail.replace(/(?:^|\s)--?\w+/g, '').replace(/\s+/g, ' ').trim();
+      return cleaned ? `type ${cleaned}` : 'type';
+    });
   }
 
   // ── Security gate ──────────────────────────────────────────────────────
