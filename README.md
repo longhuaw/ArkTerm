@@ -1,6 +1,4 @@
-<p align="left">
-  <a href="README.md"><img src="https://img.shields.io/badge/文档-简体中文-orange?style=flat-square"></a>
-</p>
+<p align="right"><a href="README.zh-CN.md"><img src="https://img.shields.io/badge/文档-简体中文-orange?style=flat-square"></a></p>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/ArkTerm-7B68EE?style=for-the-badge&logo=robotframework&logoColor=white">
     <img src="https://img.shields.io/badge/ArkTerm-7B68EE?style=for-the-badge&logo=robotframework&logoColor=white" alt="ArkTerm">
