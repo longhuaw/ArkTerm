@@ -1,10 +1,9 @@
-"""Doubao-TUI — A multi-model terminal AI Agent for ByteDance Doubao LLM.
+"""ArkTerm — Multi-Model Terminal AI Agent.
 
-Install
--------
+Installation:
     pip install .                # local install
     pipx install .               # isolated global install
-    pipx run --spec . doubao-tui # one-shot run
+    pipx run --spec . arkterm    # one-shot run
 """
 
 import re
@@ -40,26 +39,27 @@ if req_path.exists():
 # ---------------------------------------------------------------------------
 init = (HERE / "src" / "__init__.py").read_text(encoding="utf-8")
 version_match = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", init, re.M)
-version = version_match.group(1) if version_match else "0.0.0"
+version = version_match.group(1) if version_match else "0.4.0"
 
 # ---------------------------------------------------------------------------
 # Package definition
 # ---------------------------------------------------------------------------
 setup(
-    name="doubao-tui",
+    name="arkterm",
     version=version,
     description="A multi-model terminal AI Agent powered by Doubao / DeepSeek / Claude",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="The Doubao-TUI Contributors",
-    url="https://github.com/your-org/doubao-tui",
+    author="Longhua Wang",
+    author_email="i@wanglonghua.me",
+    url="https://github.com/longhuawang/arkterm",
     license="MIT",
     packages=find_packages(include=["src", "src.*"]),
     python_requires=">=3.10",
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "doubao-tui = src.main:main",
+            "arkterm = src.main:main",
         ],
     },
     classifiers=[
@@ -76,9 +76,9 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    keywords="doubao llm terminal tui agent ai deepseek claude openai volcengine",
+    keywords="arkterm doubao llm terminal tui agent ai deepseek claude openai volcengine",
     project_urls={
-        "Source": "https://github.com/your-org/doubao-tui",
-        "Issues": "https://github.com/your-org/doubao-tui/issues",
+        "Source": "https://github.com/longhuawang/arkterm",
+        "Issues": "https://github.com/longhuawang/arkterm/issues",
     },
 )

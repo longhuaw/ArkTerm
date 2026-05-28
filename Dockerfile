@@ -1,19 +1,19 @@
 # ============================================================================
-# Doubao-TUI — lightweight Docker image
+# ArkTerm — lightweight Docker image
 #
 # Build:
-#   docker build -t doubao-tui .
+#   docker build -t arkterm .
 #
 # Run (bind-mount your .env from the host):
-#   docker run -it --rm -v "$PWD/.env:/app/.env" doubao-tui
+#   docker run -it --rm -v "$PWD/.env:/app/.env" arkterm
 # ============================================================================
 
 FROM python:3.10-slim
 
-LABEL org.opencontainers.image.title="doubao-tui"
+LABEL org.opencontainers.image.title="arkterm"
 LABEL org.opencontainers.image.description="Multi-model terminal AI Agent (Doubao / DeepSeek / Claude)"
 LABEL org.opencontainers.image.licenses="MIT"
-LABEL org.opencontainers.image.source="https://github.com/your-org/doubao-tui"
+LABEL org.opencontainers.image.source="https://github.com/longhuawang/arkterm"
 
 # ---------------------------------------------------------------------------
 # System dependencies (none needed beyond the slim image base)
@@ -31,6 +31,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
+COPY bin/ ./bin/
 
 # .env is expected to be mounted at runtime, not baked into the image
 COPY .env ./.env.example 2>/dev/null || true

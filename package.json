@@ -1,10 +1,11 @@
 {
-  "name": "doubao-tui",
+  "name": "arkterm",
   "version": "0.4.0",
-  "description": "A multi-model terminal AI Agent powered by Doubao / DeepSeek / Claude",
-  "homepage": "https://github.com/your-org/doubao-tui",
+  "description": "A multi-model terminal AI Agent powered by Doubao / DeepSeek / Claude — press Tab to swap brains.",
+  "homepage": "https://github.com/longhuawang/arkterm",
   "license": "MIT",
   "keywords": [
+    "arkterm",
     "doubao",
     "llm",
     "terminal",
@@ -16,7 +17,7 @@
     "openai"
   ],
   "bin": {
-    "doubao-tui": "./bin/index.js"
+    "arkterm": "./bin/index.js"
   },
   "files": [
     "bin/",
@@ -34,9 +35,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/doubao-tui.git"
+    "url": "https://github.com/longhuawang/arkterm.git"
   },
   "bugs": {
-    "url": "https://github.com/your-org/doubao-tui/issues"
+    "url": "https://github.com/longhuawang/arkterm/issues"
   }
 }

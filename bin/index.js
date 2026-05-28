@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Doubao-TUI — Node.js bridge for npm global install.
+ * ArkTerm — Node.js bridge for npm global install.
  *
  * Spawns the Python agent with `stdio: 'inherit'` so that interactive TUI
  * streams (Rich colours, y/n prompts, streaming output) pass through
@@ -26,6 +26,6 @@ child.on("close", (code) => {
 });
 
 child.on("error", (err) => {
-  console.error("Failed to launch doubao-tui:", err.message);
+  console.error("Failed to launch arkterm:", err.message);
   process.exit(1);
 });

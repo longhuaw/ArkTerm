@@ -1,29 +1,30 @@
-"""Main entry point for Doubao-TUI — Smart-routing AI Agent edition.
+"""ArkTerm — Multi-Model Terminal AI Agent.
 
-Features
---------
-- **Tab-cycle model switching**: press ``Tab`` to toggle between Doubao ↔ DeepSeek
-  instantly — no Enter needed.  The prompt updates live.
-- **Intent-aware routing**: chat requests skip the tool layer for sub-0.5s TTFT;
-  action keywords (read/write/run/cmd …) automatically engage the full Agent cycle.
-- Live stream rendering, speed metrics, security gates, and polished dividers.
+Core architecture:
+- **Tab‑Cycle Brain Swap**:  press ``Tab`` to toggle between Doubao ↔ DeepSeek
+  instantly — no ``Enter`` needed, prompt colour updates live.
+- **Intent‑Aware Routing**:  pure chat skips the tool load (TTFT < 0.5 s);
+  action keywords (read/write/run/…) activate the full Agent state machine.
+- **Precision Speed Meter**:  network‑handshake time stripped from generation
+  throughput, giving you true tok/s.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sys
 import time
-from typing import Any, Dict, List, NoReturn, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openai import APIError
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.table import Table
 
 from src.config import Config, get_openai_client
 from src.security import is_safe_command, request_user_permission
@@ -47,11 +48,13 @@ _TOOL_TRIGGERS: frozenset[str] = frozenset({
     # Chinese
     "看", "读", "写", "改", "运行", "执行", "创建", "删除",
     "文件", "目录", "命令", "终端", "代码", "保存", "修改", "查看",
+    "搜索", "查找", "打开", "移动", "复制", "编译", "安装",
     # English
     "read", "write", "run", "cmd", "ls", "dir", "view", "edit",
     "open", "create", "delete", "mkdir", "file", "exec", "patch",
     "save", "cat", "grep", "find", "ps", "kill", "mv", "cp", "rm",
-    "shell", "terminal", "code", "bash",
+    "shell", "terminal", "code", "bash", "chmod", "chown",
+    "build", "compile", "install", "search", "grep",
 })
 
 
@@ -68,15 +71,14 @@ WELCOME = r"""
 [bold cyan]
     ╔═══════════════════════════════════════════╗
     ║                                           ║
-    ║   ██████╗  ██████╗ ██╗   ██╗██████╗  █████╗  ██████╗
-    ║   ██╔══██╗██╔═══██╗██║   ██║██╔══██╗██╔══██╗██╔═══██╗
-    ║   ██║  ██║██║   ██║██║   ██║██████╔╝███████║██║   ██║
-    ║   ██║  ██║██║   ██║██║   ██║██╔══██╗██╔══██║██║   ██║
-    ║   ██████╔╝╚██████╔╝╚██████╔╝██████╔╝██║  ██║╚██████╔╝
-    ║   ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝
-    ║                                           ║
-    ║      ByteDance Doubao LLM · Terminal AI Agent
-    ║                                           ║
+    ║   █████╗ ██████╗ ██╗  ██╗████████╗       ║
+    ║  ██╔══██╗██╔══██╗██║ ██╔╝╚══██╔══╝       ║
+    ║  ███████║██████╔╝█████╔╝    ██║           ║
+    ║  ██╔══██║██╔══██╗██╔═██╗    ██║           ║
+    ║  ██║  ██║██║  ██║██║  ██╗   ██║           ║
+    ║  ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝           ║
+    ║      Doubao · DeepSeek · Claude            ║
+    ║           Terminal AI Agent                 ║
     ╚═══════════════════════════════════════════╝
 [/bold cyan]
 """
@@ -109,7 +111,7 @@ def _save_to_file(content: str, filename: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# prompt_toolkit bindings — Tab-cycle model switch
+# prompt_toolkit bindings — Tab‑cycle model switch
 # ---------------------------------------------------------------------------
 
 # Mutable container so the key-binding callback can signal the main loop.
@@ -129,26 +131,42 @@ def _tab_cycle_model(event: object) -> None:
     event.app.exit(result="")
 
 
-def _pt_prompt_text() -> List[Tuple[str, str]]:
-    """返回原生支持 prompt_toolkit 的强类型样式提示符，彻底解决 Windows 乱麻."""
-    display = Config.get_current_model_display_name()
-    return [
-        ("class:cyan bold", f"({display}) You ❯ "),
-    ]
+def _build_prompt() -> FormattedText:
+    """Build a `FormattedText` prompt with the current model's colour.
 
-
-def _do_switch_model(target: str) -> str | None:
-    """Switch model, rebuild client, clear history, and print a status line.
-
-    Returns the display name on success, or ``None`` on failure.
+    Returns a ``FormattedText`` instance that prompt_toolkit renders natively,
+    avoiding any ANSI/HTML rendering issues on Windows terminals.
     """
-    display = Config.switch_model(target)
-    if display is None:
-        return None
-    console.print(
-        f"[bold]🔄 Switched to [bold magenta]{display}[/bold magenta][/bold]"
-    )
-    return display
+    display = Config.get_current_model_display_name()
+    return FormattedText([
+        ("#00d4ff bold", f"({display}) You ❯ "),
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Speed metrics
+# ---------------------------------------------------------------------------
+
+def _compute_speed_metrics(
+    start_time: float,
+    first_token_time: float,
+    total_chars: int,
+) -> Tuple[float, float, float]:
+    """Return ``(ttft, gen_speed, avg_speed)``.
+
+    - ``ttft``: time to first token (seconds)
+    - ``gen_speed``: chars per second *after* TTFT (pure generation speed)
+    - ``avg_speed``: total chars / total time (including TTFT)
+    """
+    now = time.time()
+    total_elapsed = now - start_time
+    ttft = first_token_time - start_time
+    gen_elapsed = now - first_token_time
+
+    gen_speed = (total_chars / gen_elapsed) if gen_elapsed > 0 else 0.0
+    avg_speed = (total_chars / total_elapsed) if total_elapsed > 0 else 0.0
+
+    return ttft, gen_speed, avg_speed
 
 
 # ===================================================================
@@ -175,6 +193,7 @@ def _stream_and_parse(
 
     start_time: float = time.time()
     first_token_time: Optional[float] = None
+    total_chars: int = 0
     last_usage: Optional[object] = None
 
     # ---- Build request kwargs ------------------------------------------------
@@ -182,6 +201,7 @@ def _stream_and_parse(
         "model": Config.CURRENT_MODEL.strip(),
         "messages": messages,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     if with_tools:
         kwargs["tools"] = TOOL_SCHEMAS
@@ -199,7 +219,7 @@ def _stream_and_parse(
     full_text: str = ""
     tool_calls_acc: Dict[int, Dict[str, str]] = {}
 
-    # ── Live rendering block ─────────────────────────────────────────────────
+    # ---- Live rendering block ------------------------------------------------
     with Live(
         Panel("", title=title, border_style="green",
               subtitle="[dim]Waiting for response…[/dim]"),
@@ -210,342 +230,331 @@ def _stream_and_parse(
 
         try:
             for chunk in stream:
-                if not chunk.choices or len(chunk.choices) == 0:
-                    continue
-                delta = chunk.choices[0].delta
+                delta = chunk.choices[0].delta if chunk.choices else None
 
-                # ---- text content --------------------------------------------
+                # ── Text content ───────────────────────────────────────────────
                 if delta and delta.content:
                     if first_token_time is None:
                         first_token_time = time.time()
                     full_text += delta.content
+                    total_chars += len(delta.content)
 
-                    now = time.time()
-                    ttft = first_token_time - start_time
-                    elapsed = max(now - first_token_time, 0.001)
-                    est_tokens = max(len(full_text) / 4.0, 0.25)
-                    speed = est_tokens / elapsed
-                    
-                    subtitle = (
-                        f"[dim]Speed: {speed:.1f} tok/s  |  "
-                        f"TTFT: {ttft:.2f}s[/dim]"
-                    )
-                    live.update(
-                        Panel(full_text, title=title,
-                              border_style="green", subtitle=subtitle)
-                    )
-
-                # ---- tool-call deltas ----------------------------------------
+                # ── Tool calls ──────────────────────────────────────────────────
                 if delta and delta.tool_calls:
                     for tc in delta.tool_calls:
-                        idx: int = tc.index
+                        idx = tc.index
                         if idx not in tool_calls_acc:
                             tool_calls_acc[idx] = {
-                                "id": "", "name": "", "arguments": "",
+                                "id": tc.id or "",
+                                "type": tc.type or "function",
+                                "function_name": "",
+                                "arguments": "",
                             }
-                        if tc.id:
-                            tool_calls_acc[idx]["id"] = tc.id
                         if tc.function:
                             if tc.function.name:
-                                tool_calls_acc[idx]["name"] += tc.function.name
+                                tool_calls_acc[idx]["function_name"] += tc.function.name
                             if tc.function.arguments:
                                 tool_calls_acc[idx]["arguments"] += tc.function.arguments
 
-                    names = [
-                        v["name"]
-                        for v in tool_calls_acc.values()
-                        if v["name"]
-                    ]
-                    if names and not full_text:
-                        live.update(
-                            Panel("[dim]🔧 Preparing tool call…[/dim]",
-                                  title=title, border_style="green",
-                                  subtitle=f"[dim]Tools: {', '.join(names)}[/dim]")
-                        )
-
-                # ---- usage ---------------------------------------------------
+                # ── Usage metadata (last chunk with usage info) ────────────────
                 if chunk.usage:
                     last_usage = chunk.usage
 
-        except KeyboardInterrupt:
-            live.update(
-                Panel(full_text + "\n\n[dim italic](Interrupted)[/dim italic]",
-                      title=title, border_style="green")
-            )
-            console.print()
-            return full_text, []
-        except APIError as exc:
-            live.update(
-                Panel(full_text + f"\n\n[bold red](Stream error: {exc})[/bold red]",
-                      title=title, border_style="red")
-            )
-            console.print()
-            return full_text, []
+                # ── Update live panel ──────────────────────────────────────────
+                ttft_s, gen_speed, avg_speed = _compute_speed_metrics(
+                    start_time,
+                    first_token_time or time.time(),
+                    total_chars,
+                )
 
-    # ---- Post-stream summary ------------------------------------------------
-    total_time = time.time() - start_time
-    if first_token_time is not None and full_text:
-        ttft = first_token_time - start_time
-        pure_generation_time = max(time.time() - first_token_time, 0.001)
-        if last_usage and getattr(last_usage, "completion_tokens", 0) > 0:
-            comp = last_usage.completion_tokens
-            avg_speed = comp / pure_generation_time
-            console.print(
-                f"[dim]── Speed: {avg_speed:.1f} tok/s  |  "
-                f"TTFT: {ttft:.2f}s  |  "
-                f"{comp} tokens  |  "
-                f"{total_time:.1f}s total[/dim]"
-            )
-        else:
-            comp_est = len(full_text) / 4.0
-            avg_speed = comp_est / pure_generation_time
-            console.print(
-                f"[dim]── Speed: {avg_speed:.1f} tok/s  |  "
-                f"TTFT: {ttft:.2f}s  |  "
-                f"{len(full_text)} chars  |  "
-                f"{total_time:.1f}s elapsed[/dim]"
-            )
+                metrics_table = Table.grid(padding=(0, 1))
+                metrics_table.add_column(style="dim", justify="right")
+                metrics_table.add_column(style="bold")
+                metrics_table.add_row("TTFT", f"{ttft_s:.2f}s")
+                metrics_table.add_row("Gen", f"{gen_speed:.0f} ch/s")
+                metrics_table.add_row("Avg", f"{avg_speed:.0f} ch/s")
+                metrics_table.add_row("Chars", str(total_chars))
 
-    # ---- Assemble final tool-call list ---------------------------------------
-    parsed: List[Dict[str, str]] = []
+                display_text = full_text if full_text else "[dim]streaming…[/dim]"
+                if total_chars > 200:
+                    display_text = full_text[-200:]
+
+                panel_content = f"{display_text}\n\n[bright_black]─── Speed ───[/bright_black]\n"
+                live.update(
+                    Panel(
+                        panel_content,
+                        title=title,
+                        border_style="green",
+                        subtitle=f"[bold cyan]{gen_speed:.0f} ch/s[/bold cyan]"
+                                 f"  [dim]| TTFT {ttft_s:.2f}s[/dim]",
+                    )
+                )
+
+        except Exception as exc:
+            console.print(f"\n[bold red]Stream error:[/bold red] {exc}")
+
+    # ---- Build final tool-call list -------------------------------------------
+    tool_calls: List[Dict[str, str]] = []
     for idx in sorted(tool_calls_acc.keys()):
         tc = tool_calls_acc[idx]
-        if tc["id"] and tc["name"]:
-            parsed.append(
-                {"id": tc["id"], "name": tc["name"], "arguments": tc["arguments"]}
-            )
+        if tc["function_name"]:
+            tool_calls.append({
+                "id": tc["id"],
+                "type": tc["type"],
+                "function": {
+                    "name": tc["function_name"],
+                    "arguments": tc["arguments"],
+                },
+            })
 
-    return full_text, parsed
+    # ---- Speed summary after streaming ends ----------------------------------
+    ttft_s, gen_speed, avg_speed = _compute_speed_metrics(
+        start_time,
+        first_token_time or start_time,
+        total_chars,
+    )
+    console.print(
+        f"  [dim]TTFT[/dim] [cyan]{ttft_s:.2f}s[/cyan]  "
+        f"[dim]Gen[/dim] [bold cyan]{gen_speed:.0f} ch/s[/bold cyan]  "
+        f"[dim]Avg[/dim] [cyan]{avg_speed:.0f} ch/s[/cyan]  "
+        f"[dim]⎸ {total_chars} chars[/dim]"
+    )
+
+    return full_text, tool_calls
 
 
 # ===================================================================
-# Single tool execution (with security gates)
+# Tool execution with security gates
 # ===================================================================
 
-def _execute_agent_tool(name: str, raw_args: str) -> str:
-    """Execute one tool call and return the result string.
+def _execute_tool_call(tc: Dict[str, str]) -> str:
+    """Execute a single tool call, applying security checks where needed.
 
-    Applies dual-layer security: blacklist + user permission for commands,
-    user permission for file writes.
+    Args:
+        tc: A dict with ``name``, ``arguments`` (JSON string).
+
+    Returns:
+        The tool's result string.
     """
+    name = tc.get("function", {}).get("name", "")
+    raw_args = tc.get("function", {}).get("arguments", "{}")
+
     try:
-        args: Dict[str, Any] = json.loads(raw_args) if raw_args else {}
+        args = json.loads(raw_args) if raw_args.strip() else {}
     except json.JSONDecodeError:
         return f"Error: invalid JSON arguments — {raw_args!r}"
 
-    func = TOOL_DISPATCH.get(name)
-    if func is None:
-        return f"Error: unknown tool '{name}'"
-
+    # ── High-risk tools: security sandbox ─────────────────────────────────────
     if name == "execute_command":
-        cmd: str = args.get("command", "")
+        cmd = args.get("command", "")
         if not is_safe_command(cmd):
-            return "❌ Command blocked by security blacklist."
-        if not request_user_permission(name, f"Execute: [cyan]{cmd}[/cyan]"):
-            return "⛔ User denied this action."
+            return (
+                f"❌ Blocked by Layer‑1 Blacklist: {cmd!r}\n"
+                f"This command matches a dangerous pattern and was rejected."
+            )
+        if not request_user_permission("execute_command", f"Run: {cmd}"):
+            return f"❌ Cancelled by user (Layer‑2 Authorisation)."
 
     elif name in ("write_file", "patch_file"):
-        detail = f"{name}: [cyan]{args.get('path', '?')}[/cyan]"
-        if not request_user_permission(name, detail):
-            return "⛔ User denied this action."
+        path = args.get("path", "(unknown)")
+        desc = f"Tool: {name} → {path}"
+        if not request_user_permission(name, desc):
+            return f"❌ Cancelled by user."
+
+    # ── Dispatch ──────────────────────────────────────────────────────────────
+    handler = TOOL_DISPATCH.get(name)
+    if handler is None:
+        return f"Error: unknown tool — {name}"
 
     try:
-        if args:
-            return func(**args)
-        return func()
+        return str(handler(**args))
     except TypeError as exc:
-        return f"Error: bad arguments for '{name}' — {exc}"
+        return f"Error: invalid arguments for {name}: {exc}"
     except Exception as exc:
-        return f"Error executing '{name}': {exc}"
+        return f"Error executing {name}: {exc}"
 
 
-# ===================================================================
-# Agentic loop
-# ===================================================================
-
-def agentic_loop(
-    client: "OpenAI",
-    session: ChatSession,
-    user_input: str,
+def _run_agent_cycle(
+    client: "OpenAI", session: ChatSession, user_text: str
 ) -> None:
-    """Run the autonomous agent cycle for a single user request."""
-    session.add_user_message(user_input)
+    """Full Agent loop: stream → tool calls → stream → … up to ``_MAX_AGENT_TURNS``.
 
-    for _turn in range(_MAX_AGENT_TURNS):
-        full_text, tool_calls = _stream_and_parse(client, session)
+    Args:
+        client: The active OpenAI client.
+        session: The current chat session.
+        user_text: The raw user input.
+    """
+    session.add_user_message(user_text)
 
-        if not tool_calls:
-            if full_text:
-                session.add_assistant_message(full_text)
-            return
+    for turn in range(_MAX_AGENT_TURNS):
+        console.print(f"\n[dim]── Agent turn {turn + 1} ──[/dim]")
 
-        assistant_msg: Dict[str, Any] = {
-            "role": "assistant",
-            "content": full_text or None,
-            "tool_calls": [
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": tc["arguments"],
-                    },
-                }
-                for tc in tool_calls
-            ],
-        }
-        session.append_message(assistant_msg)
+        # ── Determine intent on first turn ────────────────────────────────────
+        with_tools = True  # always in agent mode after first turn
 
-        names = [tc["name"] for tc in tool_calls]
-        console.print(
-            f"[bold yellow]⚙️  Agent 正在本地运行: {', '.join(names)}...[/bold yellow]"
+        text, tool_calls = _stream_and_parse(
+            client, session, with_tools=with_tools
         )
 
+        # ── No tool calls → end loop ─────────────────────────────────────────
+        if not tool_calls:
+            if text:
+                session.add_assistant_message(text)
+            return
+
+        # ── Execute tool calls ────────────────────────────────────────────────
         for tc in tool_calls:
-            result = _execute_agent_tool(tc["name"], tc["arguments"])
-            session.append_message(
-                {"role": "tool", "tool_call_id": tc["id"], "content": result}
-            )
+            name = tc.get("function", {}).get("name", "")
+            console.print(f"  [yellow]⚙️  → {name}[/yellow]")
+            result = _execute_tool_call(tc)
+            console.print(f"  [dim]{result[:200]}[/dim]")
+
+            # Feed tool result back to the model
+            session.append_message({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    }
+                ],
+            } | ({} if "id" not in tc else {}))
+            session.append_message({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": result,
+            })
 
     console.print(
-        "[yellow]⚠️  Agent turn limit reached. "
-        "The model may be stuck in a tool-call loop.[/yellow]"
+        f"[yellow]⚠ Reached max turns ({_MAX_AGENT_TURNS}). "
+        f"Response may be incomplete.[/yellow]"
     )
 
 
 # ===================================================================
-# Main interactive loop
-# ===================================================================
+# Main entry point
+# ====================================================================
 
-def main() -> NoReturn:
-    """Run the Doubao-TUI smart-routing AI Agent."""
+def main() -> None:
+    """ArkTerm main loop.
+
+    Initialises the configuration, displays the welcome banner, and enters
+    the interactive read–stream loop with Tab‑cycle brain switching.
+    """
+    # ---- Validate configuration ----------------------------------------------
     Config.validate()
-
-    try:
-        client = get_openai_client()
-    except SystemExit:
-        raise
-    except Exception as exc:
-        console.print(
-            f"[bold red]Failed to initialise OpenAI client:[/bold red] {exc}"
-        )
-        sys.exit(1)
-
-    session = ChatSession()
-    pt_session = PromptSession(key_bindings=_bindings)
 
     # ---- Welcome -------------------------------------------------------------
     console.print(WELCOME)
     console.print(USAGE_HINT)
-    console.print()
+    console.print(Rule(style="dim"))
 
-    # ---- Interactive loop ----------------------------------------------------
+    # ---- State ---------------------------------------------------------------
+    session = ChatSession()
+    client = get_openai_client()
+    pt_session: PromptSession = PromptSession(key_bindings=_bindings)
+
+    # ---- Main loop -----------------------------------------------------------
     while True:
-        # --- prompt_toolkit input ---------------------------------------------
         try:
-            user_input: str = pt_session.prompt(
-                _pt_prompt_text, mouse_support=False
-            ).strip()
-        except KeyboardInterrupt:
-            console.print("\n[dim]Goodbye![/dim]")
-            sys.exit(0)
-        except EOFError:
-            console.print("\n[dim]Goodbye![/dim]")
-            sys.exit(0)
+            # Build the styled prompt
+            prompt = _build_prompt()
 
-        # --- Handle Tab-cycled model switch -----------------------------------
+            raw = pt_session.prompt(prompt, key_bindings=_bindings)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
+            continue
+        except EOFError:
+            console.print("\n[yellow]Goodbye.[/yellow]")
+            break
+
+        # ── Handle Tab‑switch signal ─────────────────────────────────────────
         if _switch_request[0] is not None:
             target = _switch_request[0]
             _switch_request[0] = None
-            display = _do_switch_model(target)
-            if display is not None:
+            display = Config.switch_model(target)
+            if display:
                 client = get_openai_client()
+                # Clear history so context matches the new model
                 session.clear_history()
                 console.print(
-                    "[dim]Conversation history cleared (model changed).[/dim]"
+                    f"[bold]🔄 Switched to [bold magenta]{display}[/bold magenta][/bold]"
                 )
-            console.print()
             continue
 
-        if not user_input:
+        text = raw.strip()
+        if not text:
             continue
 
-        lower = user_input.lower()
+        # ── Built-in commands ─────────────────────────────────────────────────
+        if text == "exit" or text == "quit":
+            console.print("[yellow]Goodbye.[/yellow]")
+            break
 
-        # ---- exit / quit -----------------------------------------------------
-        if lower in ("exit", "quit"):
-            console.print("[dim]Goodbye![/dim]")
-            sys.exit(0)
-
-        # ---- /clear ----------------------------------------------------------
-        if lower == "/clear":
+        if text == "/clear":
             session.clear_history()
-            console.print("[dim]Conversation history cleared.[/dim]\n")
+            console.print("[green]✓ History cleared.[/green]")
             continue
 
-        # ---- /model <name> ---------------------------------------------------
-        if lower.startswith("/model"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
-                console.print(
-                    "[yellow]Usage: /model <name>  (db / ds / cl)[/yellow]"
-                )
-                console.print(Config.list_available_models())
-                console.print()
-                continue
-            alias = parts[1].strip()
-            if alias.lower() == "list":
-                console.print(Config.list_available_models())
-                console.print()
-                continue
-            display = _do_switch_model(alias)
-            if display is not None:
+        if text.startswith("/model "):
+            parts = text.split(maxsplit=1)
+            alias = parts[1] if len(parts) > 1 else ""
+            display = Config.switch_model(alias)
+            if display:
                 client = get_openai_client()
                 session.clear_history()
                 console.print(
-                    "[dim]Conversation history cleared (model changed).[/dim]"
+                    f"[bold]🔄 Switched to [bold magenta]{display}[/bold magenta][/bold]"
                 )
-            console.print()
             continue
 
-        # ---- /save <filename> ------------------------------------------------
-        if lower.startswith("/save"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
-                console.print(
-                    "[yellow]Usage: /save <filename>[/yellow]\n"
-                    "  Example: [cyan]/save output.py[/cyan]"
-                )
-                continue
-            filename = parts[1].strip()
-            last_reply = session.get_last_assistant_message()
-            if not last_reply:
-                console.print(
-                    "[yellow]No AI text response to save yet. "
-                    "Send a message first.[/yellow]"
-                )
-                continue
-            _save_to_file(last_reply, filename)
-            console.print()
+        if text == "/model list":
+            console.print(Config.list_available_models())
             continue
 
-        # ---- Normal turn — smart routing -------------------------------------
-        if _is_tool_request(user_input):
-            agentic_loop(client, session, user_input)
+        if text.startswith("/save "):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /save <filename>[/yellow]")
+                continue
+            content = session.get_last_assistant_message()
+            if not content:
+                console.print(
+                    "[yellow]No assistant message to save.[/yellow]"
+                )
+                continue
+            _save_to_file(content, parts[1])
+            continue
+
+        if text.startswith("/"):
+            console.print(
+                f"[yellow]Unknown command: {text}. "
+                f"Try /model, /clear, /save, exit[/yellow]"
+            )
+            continue
+
+        # ── Intent‑aware routing ─────────────────────────────────────────
+        if _is_tool_request(text):
+            console.print(
+                f"  [bold cyan]⚡ Action mode activated[/bold cyan]"
+            )
+            _run_agent_cycle(client, session, text)
         else:
-            session.add_user_message(user_input)
-            full_text, _ = _stream_and_parse(
+            # Pure chat — no tool overhead
+            session.add_user_message(text)
+            text_resp, _tool_calls = _stream_and_parse(
                 client, session, with_tools=False
             )
-            if full_text:
-                session.add_assistant_message(full_text)
+            if text_resp:
+                session.add_assistant_message(text_resp)
 
         console.print(Rule(style="dim"))
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
