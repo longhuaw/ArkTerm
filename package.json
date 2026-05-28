@@ -1,43 +1,23 @@
 {
   "name": "arkterm",
   "version": "0.4.0",
-  "description": "A multi-model terminal AI Agent powered by Doubao / DeepSeek / Claude — press Tab to swap brains.",
-  "homepage": "https://github.com/longhuawang/arkterm",
-  "license": "MIT",
-  "keywords": [
-    "arkterm",
-    "doubao",
-    "llm",
-    "terminal",
-    "tui",
-    "agent",
-    "ai",
-    "deepseek",
-    "claude",
-    "openai"
-  ],
+  "description": "Next-generation multi-model terminal AI agent dashboard powered by Doubao.",
+  "main": "./bin/index.js",
   "bin": {
     "arkterm": "./bin/index.js"
   },
   "files": [
-    "bin/",
-    "src/",
-    "requirements.txt",
-    ".env"
+    "bin",
+    "src"
   ],
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "os": [
-    "darwin",
-    "linux",
-    "win32"
+  "keywords": [
+    "ai",
+    "agent",
+    "terminal",
+    "doubao",
+    "deepseek",
+    "tui"
   ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/longhuawang/arkterm.git"
-  },
-  "bugs": {
-    "url": "https://github.com/longhuawang/arkterm/issues"
-  }
+  "author": "Longhua Wang",
+  "license": "MIT"
 }
