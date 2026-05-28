@@ -11,8 +11,22 @@ Core architecture:
 
 from __future__ import annotations
 
-import json
 import os
+import sys
+
+# ── Dynamic path injection:  ensure the project root is on sys.path ─────────
+# This block must execute before *any* `from src.xxx` import so the module
+# loader can find ``src`` when ``main.py`` is launched from an arbitrary CWD
+# (e.g. via npm global symlink, absolute path, or a non-project directory).
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+# Lock the process CWD to the project root so relative file reads work.
+os.chdir(_project_root)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
