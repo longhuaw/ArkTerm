@@ -129,11 +129,12 @@ def _tab_cycle_model(event: object) -> None:
     event.app.exit(result="")
 
 
-def _pt_prompt_text() -> str:
-    """Return the ANSI-formatted input prompt for prompt_toolkit."""
+def _pt_prompt_text() -> List[Tuple[str, str]]:
+    """返回原生支持 prompt_toolkit 的强类型样式提示符，彻底解决 Windows 乱麻."""
     display = Config.get_current_model_display_name()
-    # \x1b[1;36m = bold cyan  \x1b[0m = reset
-    return f"\x1b[1;36m({display}) You ❯\x1b[0m "
+    return [
+        ("class:cyan bold", f"({display}) You ❯ "),
+    ]
 
 
 def _do_switch_model(target: str) -> str | None:
@@ -221,9 +222,10 @@ def _stream_and_parse(
 
                     now = time.time()
                     ttft = first_token_time - start_time
-                    elapsed = now - first_token_time
+                    elapsed = max(now - first_token_time, 0.001)
                     est_tokens = max(len(full_text) / 4.0, 0.25)
-                    speed = est_tokens / elapsed if elapsed > 0 else 0.0
+                    speed = est_tokens / elapsed
+                    
                     subtitle = (
                         f"[dim]Speed: {speed:.1f} tok/s  |  "
                         f"TTFT: {ttft:.2f}s[/dim]"
@@ -284,9 +286,10 @@ def _stream_and_parse(
     total_time = time.time() - start_time
     if first_token_time is not None and full_text:
         ttft = first_token_time - start_time
+        pure_generation_time = max(time.time() - first_token_time, 0.001)
         if last_usage and getattr(last_usage, "completion_tokens", 0) > 0:
             comp = last_usage.completion_tokens
-            avg_speed = comp / (total_time - ttft) if total_time > ttft else 0
+            avg_speed = comp / pure_generation_time
             console.print(
                 f"[dim]── Speed: {avg_speed:.1f} tok/s  |  "
                 f"TTFT: {ttft:.2f}s  |  "
@@ -294,8 +297,10 @@ def _stream_and_parse(
                 f"{total_time:.1f}s total[/dim]"
             )
         else:
+            comp_est = len(full_text) / 4.0
+            avg_speed = comp_est / pure_generation_time
             console.print(
-                f"[dim]── Speed: ~{max(len(full_text) / 4.0 / max(total_time - ttft, 0.01), 0):.1f} tok/s  |  "
+                f"[dim]── Speed: {avg_speed:.1f} tok/s  |  "
                 f"TTFT: {ttft:.2f}s  |  "
                 f"{len(full_text)} chars  |  "
                 f"{total_time:.1f}s elapsed[/dim]"
