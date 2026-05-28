@@ -14,9 +14,11 @@ from dotenv import load_dotenv
 from rich.console import Console
 
 # ---------------------------------------------------------------------------
-# Load .env before anything else
+# Load .env before anything else — resolve path from package root, not CWD
 # ---------------------------------------------------------------------------
-load_dotenv(override=False)
+_package_root: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_env_path: str = os.path.join(_package_root, '.env')
+load_dotenv(dotenv_path=_env_path, override=False)
 
 console = Console(stderr=True)
 

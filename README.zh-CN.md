@@ -80,6 +80,22 @@
 | **uv** | `uv tool install arkterm` | uv |
 | **源码** | `git clone https://github.com/longhuawang/arkterm && cd arkterm && pip install -e .` | Python 3.10+ |
 
+## 🔧 本地开发与测试
+
+在推送至生产环境前，如果你想在本地测试全局命令，请运行：
+
+```bash
+npm install -g .
+# 或
+npm link
+```
+
+之后就可以在任何位置使用以下命令启动 Agent：
+
+```bash
+arkterm
+```
+
 ### 快速起步（pipx）
 
 ```bash

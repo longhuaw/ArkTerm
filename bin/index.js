@@ -1,31 +1,23 @@
 #!/usr/bin/env node
-/**
- * ArkTerm — Node.js bridge for npm global install.
- *
- * Spawns the Python agent with `stdio: 'inherit'` so that interactive TUI
- * streams (Rich colours, y/n prompts, streaming output) pass through
- * without loss.
- */
+const { spawn } = require('child_process');
+const path = require('path');
 
-const { spawn } = require("node:child_process");
-const path = require("node:path");
+const projectRoot = path.join(__dirname, '..');
 
-const child = spawn(
-  process.platform === "win32" ? "python" : "python3",
-  ["-m", "src.main"],
-  {
-    cwd: path.resolve(__dirname, ".."),
-    env: { ...process.env },
-    stdio: "inherit",
-    shell: false,
-  }
-);
-
-child.on("close", (code) => {
-  process.exit(code ?? 0);
+const pythonProcess = spawn('python', ['-m', 'src.main'], {
+    cwd: projectRoot, // 强行将 Python 的工作目录锁死在安装包根目录下
+    stdio: 'inherit',
+    env: {
+        ...process.env,
+        PYTHONPATH: projectRoot
+    }
 });
 
-child.on("error", (err) => {
-  console.error("Failed to launch arkterm:", err.message);
-  process.exit(1);
+pythonProcess.on('error', (err) => {
+    console.error(`\n[ArkTerm Error] Failed to start Python process:`, err.message);
+    process.exit(1);
+});
+
+pythonProcess.on('exit', (code) => {
+    process.exit(code || 0);
 });

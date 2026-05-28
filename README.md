@@ -82,6 +82,22 @@ Press `Tab` and your brain switches. No `Enter`. No lag. No context loss.
 | **uv** | `uv tool install arkterm` | uv |
 | **Source** | `git clone https://github.com/longhuawang/arkterm && cd arkterm && pip install -e .` | Python 3.10+ |
 
+## 🔧 Local Development & Testing
+
+If you want to test the global command locally before pushing to production, run:
+
+```bash
+npm install -g .
+# or
+npm link
+```
+
+Then you can invoke the agent from anywhere using:
+
+```bash
+arkterm
+```
+
 ### Quick Start (pipx)
 
 ```bash
