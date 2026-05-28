@@ -65,6 +65,42 @@ function createClient() {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+/**
+ * Calculate the terminal display width of a string.
+ * CJK / fullwidth characters count as 2 columns; ASCII as 1.
+ * ANSI escape sequences are stripped before measurement.
+ */
+function visualWidth(str) {
+  // Strip ANSI / VT control sequences first
+  const plain = stripVTControlCharacters(str);
+  let w = 0;
+  for (const ch of plain) {
+    const cp = ch.codePointAt(0);
+    // Fullwidth forms, CJK, and other wide characters
+    if (
+      (cp >= 0x1100 && cp <= 0x115F) ||   // Hangul Jamo
+      (cp >= 0x2329 && cp <= 0x232A) ||   // Misc technical
+      (cp >= 0x2E80 && cp <= 0xA4CF) ||   // CJK Radicals … Yi
+      (cp >= 0xA960 && cp <= 0xA97C) ||   // Hangul Jamo Extended-A
+      (cp >= 0xAC00 && cp <= 0xD7A3) ||   // Hangul Syllables
+      (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK Compatibility Ideographs
+      (cp >= 0xFE10 && cp <= 0xFE19) ||   // Vertical forms
+      (cp >= 0xFE30 && cp <= 0xFE6F) ||   // CJK Compatibility Forms
+      (cp >= 0xFF00 && cp <= 0xFF60) ||   // Fullwidth Forms
+      (cp >= 0xFFE0 && cp <= 0xFFE6) ||   // Fullwidth Signs
+      (cp >= 0x1F300 && cp <= 0x1F64F) || // Misc Symbols & Pictographs
+      (cp >= 0x1F900 && cp <= 0x1F9FF) || // Supplemental Symbols
+      (cp >= 0x20000 && cp <= 0x2FFFD) || // CJK Extension B+
+      (cp >= 0x30000 && cp <= 0x3FFFD)    // CJK Extension G+
+    ) {
+      w += 2;
+    } else {
+      w += 1;
+    }
+  }
+  return w;
+}
+
 function detectIntent(text) {
   const writingHints = /(?:^|\s)(?:read|write|edit|patch|create|make|run|exec|ls|cd|cat|grep|find|install|build|test|deploy|view|show|list|change|update|delete|remove|add|fix|debug|refactor|rename|move|copy|search|replace|format|compile|start|stop|restart)(?:\s|$)/i;
   const toolWords = [
@@ -232,8 +268,10 @@ async function readLine(promptStr) {
       readline.clearLine(stdout, 0);
       stdout.write(left + chalk.inverse(cursorChar) + right.slice(1));
       
-      const visiblePromptLen = stripVTControlCharacters(promptStr).length;
-      readline.cursorTo(stdout, visiblePromptLen + pos);
+      // Use visual (column) width for cursor positioning — CJK chars are 2 cols
+      const promptCols = visualWidth(promptStr);
+      const leftCols = visualWidth(buf.slice(0, pos));
+      readline.cursorTo(stdout, promptCols + leftCols);
     }
 
     display();
@@ -342,6 +380,76 @@ async function readLine(promptStr) {
   });
 }
 
+// ── Text‑based Tool Call Fallback ────────────────────────────────────────
+
+/**
+ * When a model doesn't support native OpenAI tool_calls, it may embed
+ * JSON tool calls inside the text response. This parser extracts them.
+ * Returns { cleanedText, toolCalls }.
+ */
+function extractTextToolCalls(text) {
+  const TOOL_NAMES = ['execute_command', 'read_file', 'write_file', 'patch_file', 'view_structure'];
+  const toolCalls = [];
+  const toRemove = []; // [startIdx, endIdx] ranges to strip
+
+  for (const toolName of TOOL_NAMES) {
+    const namePattern = new RegExp(`"name"\\s*:\\s*"${toolName}"`, 'g');
+    let match;
+    while ((match = namePattern.exec(text)) !== null) {
+      // Find the enclosing { … } by balancing braces
+      const startIdx = text.lastIndexOf('{', match.index);
+      if (startIdx === -1) continue;
+
+      let depth = 0;
+      let endIdx = -1;
+      for (let i = startIdx; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '{') { depth++; }
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) { endIdx = i; break; }
+        } else if (ch === '"') {
+          // Skip string contents
+          for (i++; i < text.length && text[i] !== '"'; i++) {
+            if (text[i] === '\\') i++; // skip escaped
+          }
+        }
+      }
+      if (endIdx === -1) continue;
+
+      const jsonStr = text.slice(startIdx, endIdx + 1);
+      try {
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.name && typeof parsed.parameters === 'object') {
+          toolCalls.push({
+            id: 'fallback_' + toolCalls.length,
+            type: 'function',
+            function: {
+              name: parsed.name,
+              arguments: JSON.stringify(parsed.parameters),
+            },
+          });
+          toRemove.push([startIdx, endIdx + 1]);
+        }
+      } catch {
+        // Malformed JSON — skip silently
+      }
+    }
+  }
+
+  // Strip extracted JSON blocks from the text (longest-first to avoid index shifts)
+  toRemove.sort((a, b) => a[0] - b[0]);
+  let cleaned = text;
+  for (let i = toRemove.length - 1; i >= 0; i--) {
+    const [s, e] = toRemove[i];
+    cleaned = cleaned.slice(0, s) + cleaned.slice(e);
+  }
+  // Collapse whitespace left by removal
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+
+  return { cleanedText: cleaned, toolCalls };
+}
+
 // ── Process Response (Agent Loop) ─────────────────────────────────────────
 
 async function processAssistantResponse(client, session) {
@@ -349,20 +457,32 @@ async function processAssistantResponse(client, session) {
     const messages = session.getMessages();
     const { fullText, toolCalls } = await streamWithPanel(client, messages, true);
 
-    // Save assistant message
-    const assistantMsg = { role: 'assistant', content: fullText || null };
-    if (toolCalls.length > 0) {
-      assistantMsg.tool_calls = toolCalls;
+    // ── Fallback: parse text-embedded JSON tool calls ────────────────────
+    let effectiveToolCalls = toolCalls;
+    let displayText = fullText;
+    if (toolCalls.length === 0 && fullText) {
+      const fallback = extractTextToolCalls(fullText);
+      if (fallback.toolCalls.length > 0) {
+        effectiveToolCalls = fallback.toolCalls;
+        displayText = fallback.cleanedText || fullText;
+        console.log(chalk.yellow(`  ⚡ Fallback parser extracted ${effectiveToolCalls.length} tool call(s) from text.`));
+      }
+    }
+
+    // Save assistant message (cleaned text when fallback was applied)
+    const assistantMsg = { role: 'assistant', content: displayText || null };
+    if (effectiveToolCalls.length > 0) {
+      assistantMsg.tool_calls = effectiveToolCalls;
     }
     session.appendMessage(assistantMsg);
 
-    if (toolCalls.length === 0) {
+    if (effectiveToolCalls.length === 0) {
       // Pure text response — done
       return;
     }
 
     // Execute each tool call
-    for (const tc of toolCalls) {
+    for (const tc of effectiveToolCalls) {
       const funcName = tc.function.name;
       let args = {};
       try {
