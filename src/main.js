@@ -8,6 +8,9 @@ const path = require('path');
 const os = require('os');
 const chalk = require('chalk');
 const boxen = require('boxen');
+const readline = require('readline');
+const http = require('http');
+const https = require('https');
 const { OpenAI } = require('openai');
 const { ChatSession } = require('./session');
 const { TOOL_SCHEMAS, TOOL_DISPATCH } = require('./tools');
@@ -31,7 +34,8 @@ Rules:
 - Use view_structure first when exploring an unfamiliar project.
 - Each tool call is one unit of work; you have up to 10 turns per request.
 - When the task is complete, explain what was done.
-- For casual questions, just answer directly.`;
+- For casual questions, just answer directly.
+- **IMPORTANT**: The system is running on **Windows**. Use \`dir\` instead of \`ls\`, \`type\` instead of \`cat\`. Shell commands use Windows conventions (backslash paths, \`&&\` for chaining).`;
 
 // ── OpenAI Client Factory (reflects current config state) ─────────────────
 
@@ -41,7 +45,12 @@ function createClient() {
     console.error(chalk.red('Error: API key or base URL not configured.'));
     process.exit(1);
   }
-  return new OpenAI({ apiKey, baseURL });
+  return new OpenAI({
+    apiKey,
+    baseURL,
+    httpAgent: new http.Agent({ keepAlive: true }),
+    httpsAgent: new https.Agent({ keepAlive: true }),
+  });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -100,11 +109,15 @@ async function streamWithPanel(client, messages, withTools) {
 
   function renderBox(text, genSpeed, ttft, avgSpeed, chars) {
     const boxStr = buildBox(text, genSpeed, ttft, avgSpeed, chars);
-    const lineCount = boxStr.split('\n').length;
+    const lines = boxStr.split('\n');
+    const lineCount = lines.length;
     if (lastBoxLineCount > 0) {
-      process.stdout.write(`\x1b[${lastBoxLineCount}A\x1b[J`);
+      // Keep the top border line fixed; redraw from line 2 onward
+      process.stdout.write(`\x1b[${lastBoxLineCount - 1}A\x1b[J`);
+      process.stdout.write(lines.slice(1).join('\n') + '\n');
+    } else {
+      process.stdout.write(boxStr + '\n');
     }
-    process.stdout.write(boxStr + '\n');
     lastBoxLineCount = lineCount;
   }
 
@@ -205,10 +218,12 @@ async function readLine(promptStr) {
       const right = buf.slice(pos);
       const cursorChar = right.length > 0 ? right[0] : ' ';
       
-      stdout.write('\r' + left + chalk.inverse(cursorChar) + right.slice(1) + '\x1b[K');
+      readline.cursorTo(stdout, 0);
+      readline.clearLine(stdout, 0);
+      stdout.write(left + chalk.inverse(cursorChar) + right.slice(1));
       
       const visiblePromptLen = stripVTControlCharacters(promptStr).length;
-      stdout.write(`\r\x1b[${visiblePromptLen + pos}C`);
+      readline.cursorTo(stdout, visiblePromptLen + pos);
     }
 
     display();

@@ -5,7 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const chalk = require('chalk');
-const { isSafeCommand, requestUserPermission } = require('./security');
+const inquirer = require('inquirer');
+const { isSafeCommand } = require('./security');
 
 const WORKSPACE = process.cwd();
 
@@ -157,15 +158,29 @@ function patchFile(filePath, search, replace) {
  * Execute a shell command (with security gate).
  */
 async function executeCommand(command) {
+  // ── Windows command translation ─────────────────────────────────────────
+  if (process.platform === 'win32') {
+    command = command.replace(/^ls(\s+.*)?$/i, (_, args) => args ? `dir${args}` : 'dir');
+    command = command.replace(/^cat(\s+.*)$/i, (_, args) => `type${args}`);
+  }
+
+  // ── Security gate ──────────────────────────────────────────────────────
   if (!isSafeCommand(command)) {
     return `[Blocked] 命令被安全模块拦截 (匹配黑名单)。`;
   }
 
-  const approved = await requestUserPermission(command);
-  if (!approved) {
+  console.log(chalk.yellow(`\n  [Security Warning] Executing: ${command}`));
+  const { confirmed } = await inquirer.prompt([{
+    type: 'confirm',
+    name: 'confirmed',
+    message: 'Execute this command?',
+    default: false,
+  }]);
+  if (!confirmed) {
     return `[Denied] 用户未批准该命令。`;
   }
 
+  // ── Execution ──────────────────────────────────────────────────────────
   try {
     const stdout = execSync(command, {
       cwd: WORKSPACE,
@@ -174,7 +189,6 @@ async function executeCommand(command) {
       encoding: 'utf-8',
       windowsHide: true,
     });
-    const stderrPart = ''; // execSync throws on non-zero, so stderr is in the error
     const output = stdout || '(no output)';
     return `$ ${command}\n${output.slice(0, 3000)}${
       output.length > 3000 ? '\n… (output truncated)' : ''
