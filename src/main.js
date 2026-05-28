@@ -44,30 +44,23 @@ Rules:
 let _cachedClient = null;
 let _cachedConfigKey = '';
 
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
 function createClient() {
   const { apiKey, baseURL } = config.getClientConfig();
-  if (!apiKey || !baseURL) {
-    console.error(chalk.red('Error: API key or base URL not configured.'));
-    process.exit(1);
-  }
+  const proxy = process.env.HTTPS_PROXY || process.env.http_proxy;
 
-  // Reuse cached client when config hasn't changed — preserves Keep-Alive
-  // connections, reducing TTFT on subsequent requests.
-  const configKey = `${apiKey}::${baseURL}`;
-  if (_cachedClient && _cachedConfigKey === configKey) {
-    return _cachedClient;
-  }
+  // 如果有代理设置，创建一个代理 Agent；否则使用直连
+  const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
 
-  _cachedClient = new OpenAI({
+  return new OpenAI({
     apiKey,
     baseURL,
-    timeout: 20_000,       // 20 s total: prevents hanging on proxy/DNS issues
-    maxRetries: 0,         // don't retry first request (saves TTFT; user retries manually)
-    httpAgent: new http.Agent({ keepAlive: true }),
-    httpsAgent: new https.Agent({ keepAlive: true }),
+    timeout: 30_000,
+    // 只有存在代理时才配置 agent，否则不配置（由系统决定）
+    httpAgent: agent,
+    httpsAgent: agent,
   });
-  _cachedConfigKey = configKey;
-  return _cachedClient;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
