@@ -85,7 +85,7 @@ async function streamWithPanel(client, messages, withTools) {
       chalk.dim('⎸ ' + chars + ' chars');
 
     return boxen(
-      displayText + '\n\n' + chalk.brightBlack('─── Speed ───') + '\n' + metrics,
+      displayText + '\n\n' + chalk.gray('─── Speed ───') + '\n' + metrics,
       {
         title: chalk.bold.green(displayName),
         borderStyle: 'round',
@@ -395,7 +395,7 @@ async function main() {
     borderColor: '#7B68EE',
     align: 'center',
   }));
-  console.log(chalk.brightBlack('   Press ') + chalk.cyan.bold('Tab') + chalk.brightBlack(' to switch models  ·  ') + chalk.cyan.bold('/help') + chalk.brightBlack(' for commands'));
+  console.log(chalk.gray('   Press ') + chalk.cyan.bold('Tab') + chalk.gray(' to switch models  ·  ') + chalk.cyan.bold('/help') + chalk.gray(' for commands'));
   console.log('');
 
   // 4. Launch REPL
