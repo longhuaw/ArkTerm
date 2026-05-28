@@ -189,6 +189,8 @@ async function readLine(promptStr) {
   return new Promise((resolve) => {
     const stdin = process.stdin;
     const stdout = process.stdout;
+
+    require('readline').emitKeypressEvents(stdin);
     const wasRaw = stdin.isRaw;
     if (stdin.isTTY) stdin.setRawMode(true);
     stdin.resume();
