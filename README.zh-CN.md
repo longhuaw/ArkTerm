@@ -1,5 +1,5 @@
 <p align="left">
-  🌐 <a href="README.md">English</a> | <b>简体中文</b>
+  <a href="README_EN.md"><img src="https://img.shields.io/badge/Documentation-English-blue?style=flat-square"></a>
 </p>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/ArkTerm-7B68EE?style=for-the-badge&logo=robotframework&logoColor=white">
