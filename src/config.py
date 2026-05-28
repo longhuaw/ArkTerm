@@ -326,8 +326,11 @@ class Config:
 
 
 # ---------------------------------------------------------------------------
-# Initialise defaults (Doubao on startup)
+# Bootstrap: validate (or run interactive wizard) before initialising defaults
 # ---------------------------------------------------------------------------
+Config.validate()
+
+# Initialise runtime state — Doubao is the default active model
 Config.CURRENT_MODEL = Config.DOUBAO_ENDPOINT_ID
 Config.CURRENT_BASE_URL = ARK_BASE_URL
 Config.CURRENT_API_KEY = Config.ARK_API_KEY
