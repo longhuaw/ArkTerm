@@ -1,0 +1,42 @@
+{
+  "name": "doubao-tui",
+  "version": "0.4.0",
+  "description": "A multi-model terminal AI Agent powered by Doubao / DeepSeek / Claude",
+  "homepage": "https://github.com/your-org/doubao-tui",
+  "license": "MIT",
+  "keywords": [
+    "doubao",
+    "llm",
+    "terminal",
+    "tui",
+    "agent",
+    "ai",
+    "deepseek",
+    "claude",
+    "openai"
+  ],
+  "bin": {
+    "doubao-tui": "./bin/index.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "requirements.txt",
+    ".env"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/doubao-tui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/doubao-tui/issues"
+  }
+}
