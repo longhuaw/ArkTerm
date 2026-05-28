@@ -10,6 +10,27 @@ const { diffLines } = require('diff');
 const { isSafeCommand } = require('./security');
 
 const WORKSPACE = process.cwd();
+const os = require('os');
+
+// Resolve path: handle ~, %VAR%, and relative paths
+function resolvePath(filePath) {
+  let p = filePath || '.';
+  // Expand ~ to home directory
+  if (p.startsWith('~')) {
+    p = path.join(os.homedir(), p.slice(1));
+  }
+  // Expand %ENV_VAR% on Windows
+  if (process.platform === 'win32') {
+    p = p.replace(/%([^%]+)%/g, (_, name) => process.env[name] || `%${name}%`);
+  }
+  // Resolve: if already absolute, path.resolve returns it as-is
+  return path.resolve(WORKSPACE, p);
+}
+
+// Auto-approve mode — toggled via /auto command in REPL
+let autoApprove = false;
+function setAutoApprove(val) { autoApprove = val; }
+function getAutoApprove() { return autoApprove; }
 
 // ── Tool implementations ──────────────────────────────────────────────────
 
@@ -57,7 +78,7 @@ function viewStructure(rootDir) {
  * Read a file (UTF-8) and return its content head/tail.
  */
 function readFile(filePath) {
-  const abs = path.resolve(WORKSPACE, filePath);
+  const abs = resolvePath(filePath);
   if (!fs.existsSync(abs)) {
     return `[Error] 文件不存在: ${filePath}`;
   }
@@ -90,7 +111,7 @@ function readFile(filePath) {
  * Supports both full content and patching instructions.
  */
 function writeFile(filePath, content) {
-  const abs = path.resolve(WORKSPACE, filePath);
+  const abs = resolvePath(filePath);
   const dir = path.dirname(abs);
   const oldContent = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : '';
   if (!fs.existsSync(dir)) {
@@ -113,7 +134,7 @@ function writeFile(filePath, content) {
  * Simulates the original Python `patch_file` logic.
  */
 function patchFile(filePath, search, replace) {
-  const abs = path.resolve(WORKSPACE, filePath);
+  const abs = resolvePath(filePath);
   if (!fs.existsSync(abs)) {
     return `[Error] 文件不存在: ${filePath}`;
   }
@@ -198,20 +219,29 @@ async function executeCommand(command) {
     return `[Blocked] 命令被安全模块拦截 (匹配黑名单)。`;
   }
 
-  console.log(chalk.yellow(`\n  [Security Warning] Executing: ${command}`));
-  const { confirmed } = await inquirer.prompt([{
-    type: 'confirm',
-    name: 'confirmed',
-    message: 'Execute this command?',
-    default: false,
-  }]);
-  if (!confirmed) {
-    return `[Denied] 用户未批准该命令。`;
+  if (autoApprove) {
+    console.log(chalk.dim(`\n  [auto] ${command}`));
+  } else {
+    console.log(chalk.yellow(`\n  [Security] Executing: ${command}`));
+    const { confirmed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmed',
+      message: 'Execute this command?',
+      default: false,
+    }]);
+    if (!confirmed) {
+      return `[Denied] 用户未批准该命令。`;
+    }
   }
 
   // ── Execution ──────────────────────────────────────────────────────────
   try {
-    const stdout = execSync(command, {
+    // Force UTF-8 on Windows (cmd.exe defaults to system code page like GBK)
+    const cmd = process.platform === 'win32'
+      ? `chcp 65001 > nul && ${command}`
+      : command;
+
+    const stdout = execSync(cmd, {
       cwd: WORKSPACE,
       timeout: 30_000,
       maxBuffer: 10 * 1024 * 1024,
@@ -348,4 +378,6 @@ const TOOL_DISPATCH = {
 module.exports = {
   TOOL_SCHEMAS,
   TOOL_DISPATCH,
+  setAutoApprove,
+  getAutoApprove,
 };

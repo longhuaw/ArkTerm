@@ -2,6 +2,8 @@
 // ArkTerm — Terminal AI Agent Main Loop
 // ---------------------------------------------------------------------------
 let exitConfirmCount = 0;
+let autoApprove = false; // /auto toggle: skip security prompts
+const { stripVTControlCharacters } = require('util');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -10,32 +12,34 @@ const boxen = require('boxen');
 const readline = require('readline');
 const { OpenAI } = require('openai');
 const { ChatSession } = require('./session');
-const { TOOL_SCHEMAS, TOOL_DISPATCH } = require('./tools');
+const { TOOL_SCHEMAS, TOOL_DISPATCH, setAutoApprove } = require('./tools');
 const config = require('./config');
 const { renderMarkdown, renderDiff, createSpinner } = require('./ui');
 const { MODEL_REGISTRY, state, ALIASES, switchModel, getCurrentDisplayName } = config;
 
 // ── Constants ─────────────────────────────────────────────────────────────
-const AGENT_MAX_TURNS = 10;
-const SYSTEM_PROMPT = `You are ArkTerm, an autonomous terminal AI agent. **You are running on Windows.** Use \`dir\` for listing files and \`type\` for reading files. Do not ask the user for OS information.
+const AGENT_MAX_TURNS = 5;
+const DESKTOP = require('os').homedir() + (process.platform === 'win32' ? '\\Desktop' : '/Desktop');
+const SYSTEM_PROMPT = `You are ArkTerm, an autonomous terminal AI agent running on Windows.
 
-You have access to 5 tools:
+Important paths:
+- Desktop: ${DESKTOP}
+- Home: ${require('os').homedir()}
+- Workspace: ${process.cwd()}
 
-1. **view_structure** — view the project directory tree (depth ≤ 3)
-2. **read_file** — read a file's content (UTF-8, auto-preview for large files)
-3. **write_file** — create or overwrite a file
-4. **patch_file** — search-and-replace edit on an existing file
-5. **execute_command** — run a shell command (with security gate + user approval)
-
-Your job is to help the user develop their project. When the user asks to read, write, or modify files, always use the appropriate tool instead of just describing what to do.
+Tools available:
+1. **view_structure** — view project directory tree (depth ≤ 3)
+2. **read_file** — read a file (UTF-8)
+3. **write_file** — create or overwrite a file (use full paths like ${DESKTOP}\\file.txt)
+4. **patch_file** — search-and-replace edit
+5. **execute_command** — run a shell command
 
 Rules:
-- Always read a file before editing it.
-- Use view_structure first when exploring an unfamiliar project.
-- Each tool call is one unit of work; you have up to 10 turns per request.
-- When the task is complete, explain what was done.
-- For casual questions, just answer directly.
-- Shell commands use Windows conventions (backslash paths, \`&&\` for chaining).`;
+- Respond in the SAME LANGUAGE as the user's message.
+- For casual greetings, reply directly WITHOUT calling any tools.
+- When writing files to the desktop, use the absolute path: ${DESKTOP}\\filename
+- Read before you edit.
+- Each turn is one tool call; you have up to 5 turns per request.`;
 
 // ── OpenAI Client Factory (cached, reflects current config state) ─────────
 
@@ -112,7 +116,7 @@ function visualWidth(str) {
 
 // ── Stream & Live Display (boxen‑based real‑time panel) ───────────────────
 
-async function streamWithPanel(client, messages, withTools) {
+async function streamWithPanel(client, messages, withTools, showBoyen = true) {
   const displayName = getCurrentDisplayName();
   const startTime = Date.now();
   let firstTokenTime = null;
@@ -129,7 +133,6 @@ async function streamWithPanel(client, messages, withTools) {
     stream_options: { include_usage: true },
   };
   if (withTools) body.tools = TOOL_SCHEMAS;
-  if (body.tools && body.tools.length === 0) delete body.tools;
 
   function buildBox(text, genSpeed, ttft, avgSpeed, chars) {
     const displayText = text || chalk.dim('streaming…');
@@ -152,6 +155,7 @@ async function streamWithPanel(client, messages, withTools) {
   }
 
   function renderBox(text, genSpeed, ttft, avgSpeed, chars) {
+    if (!showBoyen) return;
     const boxStr = buildBox(text, genSpeed, ttft, avgSpeed, chars);
     const lines = boxStr.split('\n');
     const lineCount = lines.length;
@@ -162,6 +166,12 @@ async function streamWithPanel(client, messages, withTools) {
       process.stdout.write(boxStr + '\n');
     }
     lastBoxLineCount = lineCount;
+  }
+
+  function hideBox() {
+    if (!showBoyen || lastBoxLineCount === 0) return;
+    process.stdout.write(`\x1b[${lastBoxLineCount}A\x1b[J`);
+    lastBoxLineCount = 0;
   }
 
   // Seed placeholder
@@ -192,9 +202,9 @@ async function streamWithPanel(client, messages, withTools) {
     const stream = await client.chat.completions.create(body);
     // Show spinner only while waiting for first actual data chunk
     for await (const chunk of stream) {
+      if (!firstTokenTime) firstTokenTime = Date.now();
       const delta = chunk.choices?.[0]?.delta;
       if (delta?.content) {
-        if (!firstTokenTime) firstTokenTime = Date.now();
         fullText += delta.content;
         totalChars += delta.content.length;
       }
@@ -226,9 +236,7 @@ async function streamWithPanel(client, messages, withTools) {
 
     // Final render
     updateFn(Date.now());
-
-    // Enforce final line-feed
-    process.stdout.write('\n');
+    hideBox();
 
     // Build tool calls list (preserve insertion order from object)
     const toolCalls = Object.values(toolCallsAcc)
@@ -243,10 +251,7 @@ async function streamWithPanel(client, messages, withTools) {
 
     return { fullText, toolCalls };
   } catch (err) {
-    if (lastBoxLineCount > 0) {
-      process.stdout.write(`\x1b[${lastBoxLineCount}A\x1b[J`);
-    }
-    lastBoxLineCount = 0;
+    hideBox();
     const msg = err.message || String(err);
     console.error(chalk.red.bold('\n✗ API Error: ') + msg);
     return { fullText: '', toolCalls: [] };
@@ -464,9 +469,16 @@ function extractTextToolCalls(text) {
 async function processAssistantResponse(client, session) {
   for (let turn = 0; turn < AGENT_MAX_TURNS; turn++) {
     const messages = session.getMessages();
-    const { fullText, toolCalls } = await streamWithPanel(client, messages, true);
 
-    // ── Fallback: parse text-embedded JSON tool calls ────────────────────
+    // Only show streaming panel on first turn; suppress on subsequent turns
+    const showBox = turn === 0;
+    if (!showBox) {
+      console.log(chalk.dim('  …'));
+    }
+
+    const { fullText, toolCalls } = await streamWithPanel(client, messages, true, showBox);
+
+    // Fallback: parse text-embedded JSON tool calls
     let effectiveToolCalls = toolCalls;
     let displayText = fullText;
     if (toolCalls.length === 0 && fullText) {
@@ -474,11 +486,10 @@ async function processAssistantResponse(client, session) {
       if (fallback.toolCalls.length > 0) {
         effectiveToolCalls = fallback.toolCalls;
         displayText = fallback.cleanedText || fullText;
-        console.log(chalk.yellow(`  ⚡ Fallback parser extracted ${effectiveToolCalls.length} tool call(s) from text.`));
+        console.log(chalk.yellow(`  ⚡ Fallback: ${effectiveToolCalls.length} tool call(s) from text.`));
       }
     }
 
-    // Save assistant message (cleaned text when fallback was applied)
     const assistantMsg = { role: 'assistant', content: displayText || null };
     if (effectiveToolCalls.length > 0) {
       assistantMsg.tool_calls = effectiveToolCalls;
@@ -486,9 +497,11 @@ async function processAssistantResponse(client, session) {
     session.appendMessage(assistantMsg);
 
     if (effectiveToolCalls.length === 0) {
-      // Pure text response — render markdown and finish
+      // Final response — render markdown
       if (displayText) {
         console.log(renderMarkdown(displayText));
+      } else {
+        console.log(chalk.dim('  (done)'));
       }
       return;
     }
@@ -497,13 +510,9 @@ async function processAssistantResponse(client, session) {
     for (const tc of effectiveToolCalls) {
       const funcName = tc.function.name;
       let args = {};
-      try {
-        args = JSON.parse(tc.function.arguments || '{}');
-      } catch {
-        args = {};
-      }
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
 
-      console.log(chalk.cyan(`  ⚙️  → ${funcName} ${JSON.stringify(args).slice(0, 120)}`));
+      console.log(chalk.cyan(`  ⚙  ${funcName}`));
 
       const handler = TOOL_DISPATCH[funcName];
       let result;
@@ -517,7 +526,10 @@ async function processAssistantResponse(client, session) {
         result = `[Unknown tool] ${funcName}`;
       }
 
-      // Clamp result length
+      // Brief preview of result
+      const preview = result.replace(/\n/g, ' ').slice(0, 100);
+      console.log(chalk.dim(`     ${preview}${result.length > 100 ? '…' : ''}`));
+
       const maxResultLen = 8000;
       if (result.length > maxResultLen) {
         result = result.slice(0, maxResultLen) + `\n… (truncated, ${result.length} chars total)`;
@@ -531,7 +543,7 @@ async function processAssistantResponse(client, session) {
     }
 
     if (turn === AGENT_MAX_TURNS - 1) {
-      console.log(chalk.yellow(`\n  ⚠ Reached max agent turns (${AGENT_MAX_TURNS}). Ending loop.`));
+      console.log(chalk.yellow(`\n  ⚠ Max turns (${AGENT_MAX_TURNS}) reached.`));
     }
   }
 }
@@ -631,9 +643,11 @@ async function main() {
 
       if (cmd === 'help' || cmd === 'h') {
         const modelList = config.listAvailableModels();
+        const autoStatus = autoApprove ? chalk.green('ON (auto-approve)') : chalk.yellow('OFF (ask)');
         console.log(`
 ${chalk.bold('Commands')}
   ${chalk.cyan('/model [name]')}   Switch model (doubao/db, deepseek/ds, claude/cl)
+  ${chalk.cyan('/auto')}     Toggle auto-approve: ${autoStatus}
   ${chalk.cyan('/clear')}    Clear conversation history
   ${chalk.cyan('/save')}     Save conversation to ~/.arkterm_history.json
   ${chalk.cyan('/help')}     Show this help
@@ -643,6 +657,14 @@ ${chalk.bold('Commands')}
 ${chalk.bold('Models')}
 ${modelList}
 `);
+        continue;
+      }
+
+      if (cmd === 'auto') {
+        autoApprove = !autoApprove;
+        setAutoApprove(autoApprove);
+        const status = autoApprove ? chalk.green('ON — commands execute without prompt') : chalk.yellow('OFF — each command requires approval');
+        console.log(`  Auto-approve: ${status}`);
         continue;
       }
 
