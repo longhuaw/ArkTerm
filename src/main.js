@@ -20,7 +20,42 @@ const { MODEL_REGISTRY, state, ALIASES, switchModel, getCurrentDisplayName } = c
 // ── Constants ─────────────────────────────────────────────────────────────
 const AGENT_MAX_TURNS = 5;
 const DESKTOP = require('os').homedir() + (process.platform === 'win32' ? '\\Desktop' : '/Desktop');
-const SYSTEM_PROMPT = `You are ArkTerm, an autonomous terminal AI agent running on Windows.
+/**
+ * Build the SYSTEM_PROMPT with dynamic project context injected at the top.
+ * Reads package.json (name, description, deps count) and directory tree (depth 2)
+ * so the AI immediately understands the project without extra tool calls.
+ */
+function buildSystemPrompt() {
+  let contextBlock = '';
+
+  try {
+    const pkgPath = path.join(process.cwd(), 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      const name = pkg.name || 'unknown';
+      const desc = pkg.description || '';
+      const deps = Object.keys(pkg.dependencies || {}).length;
+      const devDeps = Object.keys(pkg.devDependencies || {}).length;
+      contextBlock += `Project: ${name}${desc ? ' — ' + desc : ''} (${deps} deps, ${devDeps} devDeps)\n`;
+    }
+  } catch { /* ignore — not critical */ }
+
+  // Directory tree (depth 2, top-level only)
+  try {
+    const cwd = process.cwd();
+    const entries = fs.readdirSync(cwd, { withFileTypes: true });
+    const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules').map((e) => e.name);
+    const files = entries.filter((e) => e.isFile() && !e.name.startsWith('.')).map((e) => e.name);
+    if (dirs.length > 0 || files.length > 0) {
+      contextBlock += `Top-level: dirs=[${dirs.join(', ')}] files=[${files.join(', ')}]\n`;
+    }
+  } catch { /* ignore */ }
+
+  const contextHeader = contextBlock
+    ? `Current Project Context:\n${contextBlock}`
+    : '';
+
+  return `${contextHeader}You are ArkTerm, an autonomous terminal AI agent running on Windows.
 
 Important paths:
 - Desktop: ${DESKTOP}
@@ -29,17 +64,20 @@ Important paths:
 
 Tools available:
 1. **view_structure** — view project directory tree (depth ≤ 3)
-2. **read_file** — read a file (UTF-8)
+2. **read_file** — read a file (UTF-8), supports .docx via mammoth
 3. **write_file** — create or overwrite a file (use full paths like ${DESKTOP}\\file.txt)
 4. **patch_file** — search-and-replace edit
-5. **execute_command** — run a shell command
+5. **execute_command** — run a shell command (high-risk commands auto-blocked)
+6. **git_assistant** — git status/diff/commit with auto-generated AngularJS commit messages
 
 Rules:
 - Respond in the SAME LANGUAGE as the user's message.
 - For casual greetings, reply directly WITHOUT calling any tools.
 - When writing files to the desktop, use the absolute path: ${DESKTOP}\\filename
 - Read before you edit.
-- Each turn is one tool call; you have up to 5 turns per request.`;
+- Each turn is one tool call; you have up to 5 turns per request.
+- After completing a coding task (files written or patched), PROACTIVELY ask the user whether they want to commit the changes using git_assistant.`;
+}
 
 // ── OpenAI Client Factory (cached, reflects current config state) ─────────
 
@@ -202,13 +240,21 @@ async function streamWithPanel(client, messages, withTools, showBoyen = true) {
     const stream = await client.chat.completions.create(body);
     // Show spinner only while waiting for first actual data chunk
     for await (const chunk of stream) {
-      if (!firstTokenTime) firstTokenTime = Date.now();
       const delta = chunk.choices?.[0]?.delta;
-      if (delta?.content) {
+      const hasContent = delta?.content;
+      const hasToolCalls = delta?.tool_calls?.length > 0;
+
+      // Only record TTFT on first MEANINGFUL data — skip empty/heartbeat chunks
+      // that some APIs (e.g. Volcengine Ark) send before real tokens
+      if (!firstTokenTime && (hasContent || hasToolCalls)) {
+        firstTokenTime = Date.now();
+      }
+
+      if (hasContent) {
         fullText += delta.content;
         totalChars += delta.content.length;
       }
-      if (delta?.tool_calls) {
+      if (hasToolCalls) {
         for (const tc of delta.tool_calls) {
           const idx = tc.index;
           if (!toolCallsAcc[idx]) {
@@ -402,7 +448,7 @@ async function readLine(promptStr) {
  * Returns { cleanedText, toolCalls }.
  */
 function extractTextToolCalls(text) {
-  const TOOL_NAMES = ['execute_command', 'read_file', 'write_file', 'patch_file', 'view_structure'];
+  const TOOL_NAMES = ['execute_command', 'read_file', 'write_file', 'patch_file', 'view_structure', 'git_assistant'];
   const toolCalls = [];
   const toRemove = []; // [startIdx, endIdx] ranges to strip
 
@@ -468,7 +514,7 @@ function extractTextToolCalls(text) {
 
 async function processAssistantResponse(client, session) {
   for (let turn = 0; turn < AGENT_MAX_TURNS; turn++) {
-    const messages = session.getMessages();
+    const messages = session.getCompactMessages();
 
     // Only show streaming panel on first turn; suppress on subsequent turns
     const showBox = turn === 0;
@@ -506,13 +552,24 @@ async function processAssistantResponse(client, session) {
       return;
     }
 
+    // ── Tool icons (Claude Code style compact output) ──────────────────
+    const TOOL_ICONS = {
+      view_structure: '📁',
+      read_file: '📖',
+      write_file: '✏️',
+      patch_file: '🔧',
+      execute_command: '⚡',
+      git_assistant: '🔀',
+    };
+
     // Execute each tool call
     for (const tc of effectiveToolCalls) {
       const funcName = tc.function.name;
       let args = {};
       try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
 
-      console.log(chalk.cyan(`  ⚙  ${funcName}`));
+      const icon = TOOL_ICONS[funcName] || '🔹';
+      process.stdout.write(chalk.cyan(`  ${icon} ${funcName}...`));
 
       const handler = TOOL_DISPATCH[funcName];
       let result;
@@ -526,9 +583,15 @@ async function processAssistantResponse(client, session) {
         result = `[Unknown tool] ${funcName}`;
       }
 
-      // Brief preview of result
-      const preview = result.replace(/\n/g, ' ').slice(0, 100);
-      console.log(chalk.dim(`     ${preview}${result.length > 100 ? '…' : ''}`));
+      // Single-line status + brief preview
+      if (result.startsWith('[Error]') || result.startsWith('[Blocked]') || result.startsWith('[Denied]') || result.startsWith('[Refused]')) {
+        process.stdout.write(chalk.red(' [Failed]\n'));
+        process.stdout.write(chalk.dim(`     ${result.replace(/\n/g, ' ').slice(0, 120)}\n`));
+      } else {
+        const firstLine = result.replace(/\n/g, ' ').slice(0, 80);
+        process.stdout.write(chalk.green(' [Done]'));
+        process.stdout.write(chalk.dim(`  ${firstLine}\n`));
+      }
 
       const maxResultLen = 8000;
       if (result.length > maxResultLen) {
@@ -583,7 +646,7 @@ async function main() {
 
   // 4. Launch REPL
   const session = new ChatSession();
-  session.appendMessage({ role: 'system', content: SYSTEM_PROMPT });
+  session.appendMessage({ role: 'system', content: buildSystemPrompt() });
 
   while (true) {
     const currentModelKey = state.currentModelKey;
@@ -686,7 +749,7 @@ ${modelList}
 
       if (cmd === 'clear') {
         session.clearHistory();
-        session.appendMessage({ role: 'system', content: SYSTEM_PROMPT });
+        session.appendMessage({ role: 'system', content: buildSystemPrompt() });
         console.log(chalk.green('  Conversation cleared.'));
         continue;
       }

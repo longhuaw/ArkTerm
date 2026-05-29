@@ -3,11 +3,40 @@
 // ---------------------------------------------------------------------------
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { spawn } = require('child_process');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
 const { diffLines } = require('diff');
-const { isSafeCommand } = require('./security');
+const { TextDecoder } = require('util');
+const { isSafeCommand, isHighRisk, quickConfirm } = require('./security');
+
+// ── Encoding helpers ────────────────────────────────────────────────────────
+const gbkDecoder = new TextDecoder('gbk');
+
+/**
+ * Decode a raw Buffer → string using the correct locale encoding.
+ * On Windows consoles (cmd.exe) output is typically GBK/CP936;
+ * on Unix the stdout pipe produces UTF-8 natively.
+ */
+function decodeOutput(chunk) {
+  if (!Buffer.isBuffer(chunk)) return String(chunk);
+  return process.platform === 'win32'
+    ? gbkDecoder.decode(chunk, { stream: true })
+    : chunk.toString('utf-8');
+}
+
+// Lazy-loaded mammoth for .docx parsing
+let _mammoth = null;
+function getMammoth() {
+  if (!_mammoth) {
+    try {
+      _mammoth = require('mammoth');
+    } catch {
+      return null;
+    }
+  }
+  return _mammoth;
+}
 
 const WORKSPACE = process.cwd();
 const os = require('os');
@@ -75,35 +104,158 @@ function viewStructure(rootDir) {
 }
 
 /**
- * Read a file (UTF-8) and return its content head/tail.
+ * Check whether a resolved absolute path is within allowed boundaries.
+ * Prevents path-traversal attacks and access to sensitive system directories.
  */
-function readFile(filePath) {
-  const abs = resolvePath(filePath);
-  if (!fs.existsSync(abs)) {
-    return `[Error] 文件不存在: ${filePath}`;
+function isPathSafe(absPath) {
+  const allowedRoots = [
+    WORKSPACE,
+    os.homedir(),
+    path.join(os.homedir(), 'Desktop'),
+    path.join(os.homedir(), 'Documents'),
+    path.join(os.homedir(), 'Downloads'),
+  ];
+  const resolved = path.resolve(absPath);
+  for (const root of allowedRoots) {
+    // resolved must either equal root or start with root + separator
+    if (resolved === root || resolved.startsWith(root + path.sep)) {
+      return true;
+    }
   }
-  const stat = fs.statSync(abs);
-  if (!stat.isFile()) {
-    return `[Error] 不是文件: ${filePath}`;
-  }
-  const content = fs.readFileSync(abs, 'utf-8');
-  const lines = content.split('\n');
-  const totalLines = lines.length;
-  const totalChars = content.length;
+  return false;
+}
 
-  // Preview: first 50 + last 50 lines if too large
-  if (totalLines > 200) {
-    const head = lines.slice(0, 50).join('\n');
-    const tail = lines.slice(-50).join('\n');
-    return (
-      `📄 ${filePath} (${totalLines} lines, ${totalChars} chars)\n` +
-      `─── HEAD (1-50) ───\n${head}\n` +
-      `─── ... (${totalLines - 100} lines omitted) ───\n` +
-      `─── TAIL (${totalLines - 49}-${totalLines}) ───\n${tail}`
-    );
-  }
+/**
+ * Read a file (UTF-8) and return its content.
+ *
+ * Behaviour by size:
+ *   ≤ 200 lines  → full content
+ *   201–1000 lines → head 50 + tail 50 preview
+ *   > 1000 lines  → structure summary only (refuse full read)
+ *   > 500 KB raw  → refused (likely binary)
+ */
+async function readFile(filePath) {
+  try {
+    const abs = resolvePath(filePath);
 
-  return `📄 ${filePath} (${totalLines} lines, ${totalChars} chars)\n${content}`;
+    // ── Safety: path traversal guard ─────────────────────────────────
+    if (!isPathSafe(abs)) {
+      return (
+        `[Error] 路径越权: ${filePath}\n` +
+        `  解析路径: ${abs}\n` +
+        `  只允许访问工作区 (${WORKSPACE}) 及用户目录下的文件。`
+      );
+    }
+
+    if (!fs.existsSync(abs)) {
+      return `[Error] 文件不存在: ${filePath}`;
+    }
+
+    const stat = fs.statSync(abs);
+    if (!stat.isFile()) {
+      return `[Error] 不是文件: ${filePath}`;
+    }
+
+    // ── .docx handler: extract plain text via mammoth ──────────────────
+    const ext = path.extname(abs).toLowerCase();
+    if (ext === '.docx') {
+      const mammoth = getMammoth();
+      if (!mammoth) {
+        return `[Error] 无法解析 .docx 文件：mammoth 库未安装。请运行 npm install mammoth`;
+      }
+      try {
+        const buffer = fs.readFileSync(abs);
+        const result = await mammoth.extractRawText({ buffer });
+        const text = result.value || '';
+        const lines = text.split('\n');
+        const totalLines = lines.length;
+        const totalChars = text.length;
+
+        if (result.messages && result.messages.length > 0) {
+          const warnings = result.messages
+            .filter((m) => m.type === 'warning')
+            .slice(0, 3)
+            .map((m) => m.message)
+            .join('; ');
+          if (warnings) {
+            return (
+              `📄 ${filePath} (.docx → text, ${totalLines} lines, ${totalChars} chars)\n` +
+              `⚠ 解析警告: ${warnings}\n\n${text.slice(0, 8000)}${text.length > 8000 ? '\n… (content truncated)' : ''}`
+            );
+          }
+        }
+
+        return (
+          `📄 ${filePath} (.docx → text, ${totalLines} lines, ${totalChars} chars)\n\n${text.slice(0, 8000)}${text.length > 8000 ? '\n… (content truncated)' : ''}`
+        );
+      } catch (err) {
+        return `[Error] .docx 解析失败: ${err.message || err}`;
+      }
+    }
+
+    // ── Safety: size guard (likely binary or data file) ──────────────
+    const MAX_BYTES = 500 * 1024; // 500 KB
+    if (stat.size > MAX_BYTES) {
+      return (
+        `[Refused] 文件过大 (${(stat.size / 1024).toFixed(1)} KB)，可能是二进制或数据文件。\n` +
+        `  如需查看内容，请使用 execute_command 运行: head -n 100 "${abs}"`
+      );
+    }
+
+    const content = fs.readFileSync(abs, 'utf-8');
+    const lines = content.split('\n');
+    const totalLines = lines.length;
+    const totalChars = content.length;
+
+    // ── > 1000 lines: refuse full read, return structure summary ─────
+    if (totalLines > 1000) {
+      // Detect language / file type from extension
+      const ext = path.extname(abs).toLowerCase();
+      const langMap = {
+        '.js': 'JavaScript', '.ts': 'TypeScript', '.py': 'Python',
+        '.java': 'Java', '.go': 'Go', '.rs': 'Rust', '.c': 'C', '.cpp': 'C++',
+        '.h': 'C/C++ Header', '.json': 'JSON', '.md': 'Markdown', '.txt': 'Text',
+        '.html': 'HTML', '.css': 'CSS', '.yaml': 'YAML', '.yml': 'YAML',
+        '.toml': 'TOML', '.xml': 'XML', '.sh': 'Shell', '.bat': 'Batch',
+      };
+      const lang = langMap[ext] || (ext ? ext.slice(1).toUpperCase() : 'Unknown');
+
+      // Count non-empty lines
+      const nonEmpty = lines.filter((l) => l.trim().length > 0).length;
+
+      // Sample first and last few lines for context
+      const headSample = lines.slice(0, 5).map((l, i) => `  ${i + 1}: ${l.slice(0, 120)}`).join('\n');
+      const tailSample = lines.slice(-5).map((l, i) => `  ${totalLines - 4 + i}: ${l.slice(0, 120)}`).join('\n');
+
+      return (
+        `📄 ${filePath} — 文件结构摘要\n` +
+        `  类型: ${lang}  总行数: ${totalLines}  非空行: ${nonEmpty}  大小: ${(stat.size / 1024).toFixed(1)} KB\n` +
+        `  ⚠ 文件过大，已拒绝完整读取。请使用以下方式操作：\n` +
+        `    1. 使用 patch_file 对目标片段进行精确修改\n` +
+        `    2. 使用 execute_command 运行命令查看特定行范围\n` +
+        `    3. 使用 write_file 覆盖整个文件（谨慎）\n` +
+        `\n─── 前 5 行 ───\n${headSample}\n` +
+        `─── 后 5 行 ───\n${tailSample}`
+      );
+    }
+
+    // ── 201–1000 lines: head + tail preview ─────────────────────────
+    if (totalLines > 200) {
+      const head = lines.slice(0, 50).join('\n');
+      const tail = lines.slice(-50).join('\n');
+      return (
+        `📄 ${filePath} (${totalLines} lines, ${totalChars} chars)\n` +
+        `─── HEAD (1-50) ───\n${head}\n` +
+        `─── ... (${totalLines - 100} lines omitted) ───\n` +
+        `─── TAIL (${totalLines - 49}-${totalLines}) ───\n${tail}`
+      );
+    }
+
+    // ── ≤ 200 lines: full content ───────────────────────────────────
+    return `📄 ${filePath} (${totalLines} lines, ${totalChars} chars)\n${content}`;
+  } catch (err) {
+    return `[Error] 读取文件失败: ${err.message || err}\n  文件: ${filePath}`;
+  }
 }
 
 /**
@@ -196,6 +348,10 @@ function patchFile(filePath, search, replace) {
 
 /**
  * Execute a shell command (with security gate).
+ *
+ * Uses spawn() with explicit UTF‑8 env vars and .setEncoding('utf‑8') on all
+ * output streams.  No more chcp hacks — encoding is handled at the Node.js
+ * pipe layer so we always receive valid UTF‑8 regardless of OS locale.
  */
 async function executeCommand(command) {
   // ── Windows command translation ─────────────────────────────────────────
@@ -214,7 +370,11 @@ async function executeCommand(command) {
     });
   }
 
-  // ── Security gate ──────────────────────────────────────────────────────
+  // ── Security gate: high‑risk → immediate refusal ─────────────────────
+  if (isHighRisk(command)) {
+    return `[Security Refusal] This command is restricted for safety. 高危命令已被拦截: ${command.slice(0, 80)}`;
+  }
+
   if (!isSafeCommand(command)) {
     return `[Blocked] 命令被安全模块拦截 (匹配黑名单)。`;
   }
@@ -222,43 +382,268 @@ async function executeCommand(command) {
   if (autoApprove) {
     console.log(chalk.dim(`\n  [auto] ${command}`));
   } else {
-    console.log(chalk.yellow(`\n  [Security] Executing: ${command}`));
-    const { confirmed } = await inquirer.prompt([{
-      type: 'confirm',
-      name: 'confirmed',
-      message: 'Execute this command?',
-      default: false,
-    }]);
-    if (!confirmed) {
+    // Single‑key confirmation for safe commands (y = approve)
+    const ok = await quickConfirm(command);
+    if (!ok) {
       return `[Denied] 用户未批准该命令。`;
     }
   }
 
-  // ── Execution ──────────────────────────────────────────────────────────
-  try {
-    // Force UTF-8 on Windows (cmd.exe defaults to system code page like GBK)
-    const cmd = process.platform === 'win32'
-      ? `chcp 65001 > nul && ${command}`
-      : command;
+  // ── Execution (spawn, fully UTF‑8) ─────────────────────────────────────
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, [], {
+        cwd: WORKSPACE,
+        shell: true,
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+          LANG: 'en_US.UTF-8',
+          LC_ALL: 'en_US.UTF-8',
+        },
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      return resolve(
+        `$ ${command}\n${chalk.red('Error:')} ${(err.message || String(err)).slice(0, 1000)}`
+      );
+    }
 
-    const stdout = execSync(cmd, {
-      cwd: WORKSPACE,
-      timeout: 30_000,
-      maxBuffer: 10 * 1024 * 1024,
-      encoding: 'utf-8',
-      windowsHide: true,
+    // Do NOT call .setEncoding() — let chunks stay as raw Buffers.
+    // We decode manually in on('close') with TextDecoder('gbk') on Windows
+    // so Chinese system output (GBK/CP936) renders correctly.
+
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const MAX_BYTES = 10 * 1024 * 1024; // 10 MB hard cap per stream
+
+    child.stdout.on('data', (chunk) => {
+      if (stdoutBytes < MAX_BYTES) {
+        stdoutChunks.push(chunk);
+        stdoutBytes += chunk.length;
+      }
     });
-    const output = stdout || '(no output)';
-    return `$ ${command}\n${output.slice(0, 3000)}${
-      output.length > 3000 ? '\n… (output truncated)' : ''
-    }`;
-  } catch (err) {
-    const stderr = err.stderr || err.message || '(unknown error)';
-    const stdout = err.stdout || '';
-    return `$ ${command}\n${chalk.red('Error:')} ${stderr.slice(0, 1000)}${
-      stdout ? `\n${stdout.slice(0, 1000)}` : ''
-    }`;
+    child.stderr.on('data', (chunk) => {
+      if (stderrBytes < MAX_BYTES) {
+        stderrChunks.push(chunk);
+        stderrBytes += chunk.length;
+      }
+    });
+
+    // 30-second timeout
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      resolve(`$ ${command}\n${chalk.red('Error:')} Command timed out after 30s`);
+    }, 30_000);
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+
+      // Decode accumulated raw Buffers using the correct locale encoding
+      const stdout = stdoutChunks.length > 0
+        ? decodeOutput(Buffer.concat(stdoutChunks))
+        : '';
+      const stderr = stderrChunks.length > 0
+        ? decodeOutput(Buffer.concat(stderrChunks))
+        : '';
+
+      const output = stdout || '(no output)';
+      if (code === 0) {
+        resolve(
+          `$ ${command}\n${output.slice(0, 3000)}${output.length > 3000 ? '\n… (output truncated)' : ''}`
+        );
+      } else {
+        const errMsg = stderr || `exit code ${code}`;
+        resolve(
+          `$ ${command}\n${chalk.red('Error:')} ${errMsg.slice(0, 1000)}${stdout ? `\n${stdout.slice(0, 1000)}` : ''}`
+        );
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve(
+        `$ ${command}\n${chalk.red('Error:')} ${(err.message || String(err)).slice(0, 1000)}`
+      );
+    });
+  });
+}
+
+// ── Git Assistant ──────────────────────────────────────────────────────────
+
+/**
+ * Run a git command and return { stdout, stderr, code }.
+ */
+function runGit(args) {
+  return new Promise((resolve) => {
+    const child = spawn('git', args, {
+      cwd: WORKSPACE,
+      env: { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (code) => resolve({ stdout: stdout.trim(), stderr: stderr.trim(), code: code ?? 1 }));
+    child.on('error', (err) => resolve({ stdout: '', stderr: err.message, code: 1 }));
+  });
+}
+
+/**
+ * Analyse git diff output and generate an AngularJS‑convention commit message.
+ */
+function generateCommitMessage(diffText, statText) {
+  const hasDiff = diffText && diffText.trim().length > 0;
+  if (!hasDiff) return null;
+
+  const lines = diffText.split('\n');
+  const newFiles = [];
+  const deletedFiles = [];
+  const modifiedFiles = [];
+  let currentFile = '';
+
+  for (const line of lines) {
+    // Track file names from diff headers
+    const newFileMatch = line.match(/^\+\+\+ b\/(.+)$/);
+    const delFileMatch = line.match(/^--- a\/(.+)$/);
+    const delOnlyMatch = line.match(/^deleted file mode \d+$/);
+
+    if (newFileMatch) currentFile = newFileMatch[1];
+    if (delFileMatch && !currentFile) currentFile = delFileMatch[1];
+
+    if (line.startsWith('new file mode') && currentFile) {
+      newFiles.push(currentFile);
+    }
+    if (delOnlyMatch && currentFile) {
+      deletedFiles.push(currentFile);
+    }
+    if (line.startsWith('index ') && currentFile && !newFiles.includes(currentFile) && !deletedFiles.includes(currentFile)) {
+      if (!modifiedFiles.includes(currentFile)) modifiedFiles.push(currentFile);
+    }
   }
+
+  // Determine type of change
+  const allChanged = [...new Set([...newFiles, ...modifiedFiles, ...deletedFiles])];
+  let type = 'chore';
+  let scope = '';
+
+  // Heuristic: look at file extensions / paths
+  const hasTests = allChanged.some((f) => /test|spec|__tests__/.test(f));
+  const hasDocs = allChanged.some((f) => /\.md$|\.rst$|docs?\//.test(f));
+  const hasConfig = allChanged.some((f) => /\.json$|\.ya?ml$|\.toml$|\.env/.test(f) && !f.includes('package-lock'));
+  const hasSrc = allChanged.some((f) => /^src\/|^lib\/|\.js$|\.ts$|\.py$|\.go$|\.rs$/.test(f));
+  const hasBuild = allChanged.some((f) => /Dockerfile|Makefile|\.github\//.test(f));
+  const hasPkg = allChanged.some((f) => /package\.json$/.test(f));
+
+  if (hasTests && allChanged.every((f) => /test|spec/.test(f))) {
+    type = 'test';
+    scope = '';
+  } else if (hasDocs && allChanged.every((f) => /\.md$|docs?\//.test(f))) {
+    type = 'docs';
+  } else if (hasBuild && allChanged.length <= 2) {
+    type = 'build';
+  } else if (hasConfig && allChanged.length <= 2) {
+    type = 'chore';
+    scope = 'config';
+  } else if (newFiles.length > 0 && deletedFiles.length === 0) {
+    type = 'feat';
+  } else if (deletedFiles.length > 0 && newFiles.length === 0) {
+    type = 'refactor';
+    scope = 'cleanup';
+  } else if (hasSrc) {
+    // Detect fix vs feat by looking for common fix keywords in the diff
+    const combined = diffText.toLowerCase();
+    if (/fix|bug|issue|crash|error|broken|regression/.test(combined)) {
+      type = 'fix';
+    } else if (/refactor|clean|simplif|extract|rename/.test(combined)) {
+      type = 'refactor';
+    } else if (/perf|optimize|faster|slow/.test(combined)) {
+      type = 'perf';
+    } else if (/style|format|whitespace|lint/.test(combined)) {
+      type = 'style';
+    } else {
+      type = 'feat';
+    }
+  }
+
+  // Build the subject line from changed files
+  const fileNames = allChanged.map((f) => path.basename(f)).filter(Boolean);
+  let subject = '';
+  if (fileNames.length === 1 && newFiles.includes(allChanged[0])) {
+    subject = `add ${fileNames[0]}`;
+  } else if (fileNames.length === 1 && deletedFiles.includes(allChanged[0])) {
+    subject = `remove ${fileNames[0]}`;
+  } else if (fileNames.length === 1) {
+    subject = `update ${fileNames[0]}`;
+  } else if (fileNames.length <= 3) {
+    subject = fileNames.join(', ');
+  } else {
+    subject = `${fileNames[0]} and ${fileNames.length - 1} other file(s)`;
+  }
+
+  // Format: type(scope): subject
+  const header = scope ? `${type}(${scope}): ${subject}` : `${type}: ${subject}`;
+  return header.slice(0, 72); // Conventional commit max header length
+}
+
+/**
+ * Git assistant tool — status / diff / commit_all with AngularJS convention.
+ */
+async function gitAssistant(action) {
+  // ── status ──────────────────────────────────────────────────────────────
+  if (action === 'status') {
+    const { stdout, stderr, code } = await runGit(['status', '--short', '--branch']);
+    if (code !== 0) return `[Git Error] ${stderr || 'git status failed'}`;
+    return stdout || '(clean — no changes)';
+  }
+
+  // ── diff ────────────────────────────────────────────────────────────────
+  if (action === 'diff') {
+    const staged = await runGit(['diff', '--staged', '--stat']);
+    const unstaged = await runGit(['diff', '--stat']);
+    const parts = [];
+    if (staged.stdout) parts.push(`─── Staged ───\n${staged.stdout}`);
+    if (unstaged.stdout) parts.push(`─── Unstaged ───\n${unstaged.stdout}`);
+    return parts.join('\n\n') || '(no changes)';
+  }
+
+  // ── commit_all ──────────────────────────────────────────────────────────
+  if (action === 'commit_all') {
+    // 1. Check if there's anything to commit
+    const status = await runGit(['status', '--porcelain']);
+    if (!status.stdout) return '(nothing to commit — working tree clean)';
+
+    // 2. Stage all changes
+    const addResult = await runGit(['add', '.']);
+    if (addResult.code !== 0) return `[Git Error] git add failed: ${addResult.stderr}`;
+
+    // 3. Get the full diff for commit message generation
+    const stagedDiff = await runGit(['diff', '--staged']);
+    const statResult = await runGit(['diff', '--staged', '--stat']);
+
+    // 4. Generate commit message
+    const commitMsg = generateCommitMessage(stagedDiff.stdout, statResult.stdout);
+    if (!commitMsg) return '[Git Error] Could not generate commit message — no changes detected.';
+
+    // 5. Commit
+    const commitResult = await runGit(['commit', '-m', commitMsg]);
+    if (commitResult.code !== 0) {
+      return `[Git Error] Commit failed: ${commitResult.stderr}\n(Changes are staged — run git commit manually)`;
+    }
+
+    return `✅ Committed: ${commitMsg}\n${statResult.stdout || ''}`;
+  }
+
+  return `[Error] 未知 git action: ${action}。支持: status, diff, commit_all`;
 }
 
 // ── OpenAI Function‑Calling Schemas ───────────────────────────────────────
@@ -363,6 +748,25 @@ const TOOL_SCHEMAS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'git_assistant',
+      description:
+        'Git 辅助工具。status: 查看仓库状态。diff: 查看暂存/未暂存差异。commit_all: 自动分析修改内容生成 AngularJS 规范 commit message（feat/fix/chore/refactor...），执行 git add . && git commit -m。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['status', 'diff', 'commit_all'],
+            description: 'status: 仓库状态, diff: 差异摘要, commit_all: 自动提交全部变更',
+          },
+        },
+        required: ['action'],
+      },
+    },
+  },
 ];
 
 // ── Dispatch table ────────────────────────────────────────────────────────
@@ -373,6 +777,7 @@ const TOOL_DISPATCH = {
   write_file: async (args) => writeFile(args.path, args.content),
   patch_file: async (args) => patchFile(args.path, args.search, args.replace),
   execute_command: async (args) => executeCommand(args.command),
+  git_assistant: async (args) => gitAssistant(args.action),
 };
 
 module.exports = {
